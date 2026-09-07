@@ -54,7 +54,7 @@ internal data class TerminalKeySpec(
 }
 
 internal object TerminalKeyboardSpec {
-    private fun character(normal: String, shifted: String = normal, widthDp: Int = 46) =
+    private fun character(normal: String, shifted: String = normal, widthDp: Int = 42) =
         TerminalKeySpec(
             label = if (normal == shifted) normal else "$normal\n$shifted",
             normalText = normal,
@@ -68,21 +68,48 @@ internal object TerminalKeyboardSpec {
     private fun modifier(label: String, modifier: TerminalModifier, widthDp: Int = 72) =
         TerminalKeySpec(label = label, modifier = modifier, widthDp = widthDp)
 
-    val specialKeys: List<TerminalKeySpec> = buildList {
-        add(action("Esc", TerminalAction.ESCAPE, 58))
-        add(action("Home", TerminalAction.HOME, 58))
-        add(action("End", TerminalAction.END, 58))
-        add(action("PgUp", TerminalAction.PAGE_UP, 58))
-        add(action("PgDn", TerminalAction.PAGE_DOWN, 58))
-        add(action("Ins", TerminalAction.INSERT, 58))
-        add(action("Del", TerminalAction.FORWARD_DELETE, 58))
+    val functionRows: List<List<TerminalKeySpec>> =
         TerminalAction.entries
             .filter { it.name.matches(Regex("F\\d+")) }
-            .forEach { function -> add(action(function.name, function, 58)) }
-    }
+            .map { function -> action(function.name, function, 54) }
+            .chunked(4)
+
+    val navigationRows: List<List<TerminalKeySpec>> = listOf(
+        listOf(
+            action("Ins", TerminalAction.INSERT, 54),
+            action("Home", TerminalAction.HOME, 54),
+            action("PgUp", TerminalAction.PAGE_UP, 54),
+        ),
+        listOf(
+            action("Del", TerminalAction.FORWARD_DELETE, 54),
+            action("End", TerminalAction.END, 54),
+            action("PgDn", TerminalAction.PAGE_DOWN, 54),
+        ),
+    )
+
+    // A null reserves a key-sized slot so the arrows form a familiar inverted T.
+    val arrowRows: List<List<TerminalKeySpec?>> = listOf(
+        listOf(null, action("↑", TerminalAction.ARROW_UP, 54), null),
+        listOf(
+            action("←", TerminalAction.ARROW_LEFT, 54),
+            action("↓", TerminalAction.ARROW_DOWN, 54),
+            action("→", TerminalAction.ARROW_RIGHT, 54),
+        ),
+    )
+
+    val specialRows: List<List<TerminalKeySpec?>> = listOf(
+        listOf(null) + functionRows[0] + listOf(null),
+        listOf(null) + functionRows[1] + listOf(null),
+        listOf(null) + functionRows[2] + listOf(null),
+        navigationRows[0] + arrowRows[0],
+        navigationRows[1] + arrowRows[1],
+    )
+
+    val specialKeys: List<TerminalKeySpec> = specialRows.flatten().filterNotNull()
 
     val rows: List<List<TerminalKeySpec>> = listOf(
         listOf(
+            action("Esc", TerminalAction.ESCAPE, 54),
             character("`", "~"),
             character("1", "!"),
             character("2", "@"),
@@ -96,36 +123,32 @@ internal object TerminalKeyboardSpec {
             character("0", ")"),
             character("-", "_"),
             character("=", "+"),
-            action("Back", TerminalAction.BACKSPACE, 78),
+            action("Back", TerminalAction.BACKSPACE, 74),
         ),
         listOf(
-            action("Tab", TerminalAction.TAB, 64),
+            action("Tab", TerminalAction.TAB, 60),
             *"qwertyuiop".map { character(it.toString(), it.uppercase()) }.toTypedArray(),
             character("[", "{"),
             character("]", "}"),
             character("\\", "|"),
         ),
         listOf(
-            modifier("Ctrl", TerminalModifier.CTRL),
             *"asdfghjkl".map { character(it.toString(), it.uppercase()) }.toTypedArray(),
             character(";", ":"),
             character("'", "\""),
-            action("Enter", TerminalAction.ENTER, 82),
+            action("Enter", TerminalAction.ENTER, 78),
         ),
         listOf(
-            modifier("Shift", TerminalModifier.SHIFT, 82),
+            modifier("Shift", TerminalModifier.SHIFT, 78),
             *"zxcvbnm".map { character(it.toString(), it.uppercase()) }.toTypedArray(),
             character(",", "<"),
             character(".", ">"),
             character("/", "?"),
-            action("↑", TerminalAction.ARROW_UP, 54),
         ),
         listOf(
-            modifier("Alt", TerminalModifier.ALT),
-            character("Space", "Space", 260).copy(normalText = " ", shiftedText = " "),
-            action("←", TerminalAction.ARROW_LEFT, 54),
-            action("↓", TerminalAction.ARROW_DOWN, 54),
-            action("→", TerminalAction.ARROW_RIGHT, 54),
+            modifier("Ctrl", TerminalModifier.CTRL, 68),
+            modifier("Alt", TerminalModifier.ALT, 68),
+            character("Space", "Space", 300).copy(normalText = " ", shiftedText = " "),
         ),
     )
 }

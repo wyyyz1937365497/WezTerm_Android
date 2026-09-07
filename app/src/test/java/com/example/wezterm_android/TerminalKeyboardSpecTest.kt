@@ -54,10 +54,61 @@ class TerminalKeyboardSpecTest {
     }
 
     @Test
-    fun longSpecialRowIsSeparatedForRightHandGrid() {
+    fun specialKeysAreSeparatedIntoACompactRightHandPanel() {
         assertTrue(TerminalKeyboardSpec.specialKeys.size > 12)
         assertTrue(TerminalKeyboardSpec.rows.none { row ->
             row.count { it.action?.name?.matches(Regex("F\\d+")) == true } > 0
         })
+        assertTrue(TerminalKeyboardSpec.specialRows.all { row -> row.size == 6 })
+    }
+
+    @Test
+    fun functionKeysUseThreeOrderedGroupsOfFour() {
+        val expected = (1..12).map { "F$it" }
+        assertEquals(3, TerminalKeyboardSpec.functionRows.size)
+        assertTrue(TerminalKeyboardSpec.functionRows.all { row -> row.size == 4 })
+        assertEquals(
+            expected,
+            TerminalKeyboardSpec.functionRows.flatten().map { it.action?.name },
+        )
+    }
+
+    @Test
+    fun navigationAndArrowKeysStayInRecognizableClusters() {
+        assertEquals(
+            listOf(TerminalAction.INSERT, TerminalAction.HOME, TerminalAction.PAGE_UP),
+            TerminalKeyboardSpec.navigationRows[0].map { it.action },
+        )
+        assertEquals(
+            listOf(TerminalAction.FORWARD_DELETE, TerminalAction.END, TerminalAction.PAGE_DOWN),
+            TerminalKeyboardSpec.navigationRows[1].map { it.action },
+        )
+        assertEquals(
+            listOf(null, TerminalAction.ARROW_UP, null),
+            TerminalKeyboardSpec.arrowRows[0].map { it?.action },
+        )
+        assertEquals(
+            listOf(
+                TerminalAction.ARROW_LEFT,
+                TerminalAction.ARROW_DOWN,
+                TerminalAction.ARROW_RIGHT,
+            ),
+            TerminalKeyboardSpec.arrowRows[1].map { it?.action },
+        )
+    }
+
+    @Test
+    fun modifiersFollowTheMainKeyboardRows() {
+        assertEquals(TerminalAction.ESCAPE, TerminalKeyboardSpec.rows.first().first().action)
+        assertEquals(
+            listOf(TerminalModifier.CTRL, TerminalModifier.ALT),
+            TerminalKeyboardSpec.rows.last().mapNotNull { it.modifier },
+        )
+        assertEquals(
+            TerminalModifier.SHIFT,
+            TerminalKeyboardSpec.rows[TerminalKeyboardSpec.rows.lastIndex - 1]
+                .first()
+                .modifier,
+        )
     }
 }

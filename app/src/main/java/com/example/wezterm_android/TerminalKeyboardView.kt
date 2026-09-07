@@ -159,24 +159,26 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
 
         val specialKeys = GridLayout(context).apply {
             columnCount = SPECIAL_COLUMN_COUNT
-            rowCount =
-                (TerminalKeyboardSpec.specialKeys.size + SPECIAL_COLUMN_COUNT - 1) /
-                    SPECIAL_COLUMN_COUNT
+            rowCount = TerminalKeyboardSpec.specialRows.size
             setPadding(dp(6), 0, 0, 0)
         }
-        TerminalKeyboardSpec.specialKeys.forEachIndexed { index, spec ->
-            val button = keyButton(spec)
-            specialKeys.addView(
-                button,
-                GridLayout.LayoutParams(
-                    GridLayout.spec(index / SPECIAL_COLUMN_COUNT),
-                    GridLayout.spec(index % SPECIAL_COLUMN_COUNT),
-                ).apply {
-                    width = dp(spec.widthDp)
-                    height = dp(KEY_HEIGHT_DP)
-                    setMargins(dp(2), dp(2), dp(2), dp(2))
-                },
-            )
+        TerminalKeyboardSpec.specialRows.forEachIndexed { rowIndex, row ->
+            check(row.size == SPECIAL_COLUMN_COUNT)
+            row.forEachIndexed { columnIndex, spec ->
+                val keyOrSpacer = spec?.let(::keyButton) ?: View(context)
+                specialKeys.addView(
+                    keyOrSpacer,
+                    GridLayout.LayoutParams(
+                        GridLayout.spec(rowIndex),
+                        GridLayout.spec(columnIndex),
+                    ).apply {
+                        width = dp(SPECIAL_KEY_WIDTH_DP)
+                        height = dp(KEY_HEIGHT_DP)
+                        val leftMargin = if (rowIndex >= 3 && columnIndex == 3) 8 else 2
+                        setMargins(dp(leftMargin), dp(2), dp(2), dp(2))
+                    },
+                )
+            }
         }
 
         val body = LinearLayout(context).apply {
@@ -382,8 +384,9 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
 
     private companion object {
         const val KEY_HEIGHT_DP = 42
-        const val SPECIAL_COLUMN_COUNT = 4
-        const val KEYBOARD_CONTENT_MIN_WIDTH_DP = 990
+        const val SPECIAL_COLUMN_COUNT = 6
+        const val SPECIAL_KEY_WIDTH_DP = 54
+        const val KEYBOARD_CONTENT_MIN_WIDTH_DP = 1_070
         val PANEL_COLOR: Int = Color.argb(244, 18, 23, 32)
         val BORDER_COLOR: Int = Color.rgb(64, 74, 92)
         val KEY_COLOR: Int = Color.rgb(45, 54, 69)
