@@ -1,0 +1,7 @@
+# Keep intermediate device captures locally; publish only the three evidence
+# images referenced by docs/P3_TOUCH_CLIPBOARD_GATE.md.
+*
+!.gitignore
+!scrollback-history.png
+!long-press-selection-3.png
+!clipboard-pasted-2.png
