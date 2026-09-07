@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "wezterm-android-core",
+    "wezterm-android-font",
+    "wezterm-android-mux",
+    "wezterm-android-native",
+    "wezterm-android-ssh",
+]
+resolver = "2"
+
+[patch."https://github.com/wezterm/wezterm.git"]
+wezterm-ssh = { path = "vendor/wezterm-ssh-android" }
+
+[patch.crates-io]
+dirs-next = { path = "vendor/dirs-next-android" }
+
+[profile.android-dev]
+inherits = "release"
+opt-level = 1
+debug = 1
+strip = "debuginfo"

@@ -1,0 +1,8 @@
+[package]
+name = "wezterm-android-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wezterm-term = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }

@@ -1,0 +1,22 @@
+[package]
+name = "wezterm-android-mux"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+codec = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+config = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+log = "0.4"
+mux = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+# Unify the feature graph so the TLS-capable upstream client has an Android
+# OpenSSL implementation even when this first milestone uses SSH transport.
+openssl = { version = "0.10", features = ["vendored"] }
+promise = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+serde = { version = "1.0", features = ["derive"] }
+termwiz = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+wezterm-android-core = { path = "../wezterm-android-core" }
+wezterm-android-ssh = { path = "../wezterm-android-ssh" }
+wezterm-client = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+wezterm-term = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }

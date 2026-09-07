@@ -1,0 +1,26 @@
+[package]
+name = "wezterm-android-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "wezterm_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0"
+android_logger = "0.15"
+bytemuck = { version = "1.23", features = ["derive"] }
+dirs-next = "2.0"
+jni = { version = "0.21", default-features = false }
+log = "0.4"
+pollster = "0.4"
+raw-window-handle = "0.6"
+serde_json = "1.0"
+wgpu = { version = "25.0.2", default-features = false, features = ["vulkan", "wgsl"] }
+wezterm-android-core = { path = "../wezterm-android-core" }
+wezterm-android-font = { path = "../wezterm-android-font" }
+wezterm-android-mux = { path = "../wezterm-android-mux" }
+wezterm-android-ssh = { path = "../wezterm-android-ssh" }
+wezterm-term = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
