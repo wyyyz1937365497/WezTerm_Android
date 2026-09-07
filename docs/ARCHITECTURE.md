@@ -2,7 +2,7 @@
 
 最后更新：2026-09-07
 
-首个公开版本：`v0.1.0` Developer Preview
+首个公开版本：`v0.1.0`
 
 WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 
@@ -57,7 +57,7 @@ Termux:X11、proot 或 Linux 桌面环境。
 | 中英文界面 | 已完成 | English、简体中文、跟随系统 |
 | 后台恢复 | 已完成工程闭环 | 进程存活保持；失效连接或冷启动自动重附着 |
 | 16 KB 页兼容 | 仅静态验证 | ELF/APK 对齐通过，尚无 16 KB 页真机运行证据 |
-| 正式发布签名 | 未完成 | `v0.1.0` 提供 debug 签名 Developer Preview |
+| 正式发布签名 | 未完成 | `v0.1.0` GitHub Release 仍使用 debug 签名 |
 
 “已完成”只表示表中限定的功能和验证环境通过，不等价于完整桌面 WezTerm、所有
 Android 设备或长期网络压力测试已经完成。
@@ -234,7 +234,7 @@ transport 警告，不能把一个已成功创建的 GPU Surface 标记为失败
 - 默认禁用系统 SSH agent 和任意用户目录 identity 扫描；
 - debug 免密脚本只向 debug 应用私有目录 provision 独立 Ed25519 私钥；
 - 私钥、SDK 路径和构建机状态不得进入 Git 或 Release；
-- `v0.1.0` APK 为 debug 签名预览版，不作为正式密钥分发方案；
+- `v0.1.0` APK 为 debug 签名版本，不作为正式密钥分发方案；
 - 后续正式版本应使用 Android Keystore、文件选择器和独立 release signing。
 
 ## 8. 平台基线

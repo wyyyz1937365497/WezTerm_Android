@@ -2,7 +2,7 @@
 
 最后更新：2026-09-07
 
-当前版本：`v0.1.0` Developer Preview
+当前版本：`v0.1.0`
 
 主分支：`main`
 
@@ -34,7 +34,7 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | GPU 路径 | wgpu / Vulkan / `ANativeWindow` |
 | 远程模式 | 普通 SSH、SSHMUX |
 | 真机基线 | OPD2407 / OP615AL1，Android 15 / API 35，Mali-G615 MC6 |
-| 发布性质 | ARM64、debug 签名、GitHub prerelease |
+| 发布性质 | ARM64、debug 签名、GitHub Release |
 
 当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、普通
 SSH、SSHMUX、动态标签标题、安全分离、标签控制、应用内键盘、独立中文输入框、
@@ -127,7 +127,7 @@ TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3 设置�
 
 证据：
 
-- [Android 15 SSHMUX 与应用键盘](../artifacts/p4-sshmux/android15-sshmux-input-keyboard.png)
+- [Android 15 SSHMUX、动态标题与当前应用键盘](../artifacts/app-screenshots/v0.1.0-mux-keyboard.png)
 
 ### 3.7 移动端体验、设置与动态标签
 
@@ -143,6 +143,12 @@ TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3 设置�
 
 动态标题已在真机连续截图中验证：远端 pane/OSC 标题改变后，顶部标签无需手动切换便
 随快照更新。
+
+`v0.1.0` 发布截图：
+
+- [SSHMUX、动态标题与固定键盘](../artifacts/app-screenshots/v0.1.0-mux-keyboard.png)
+- [无连接像素猫](../artifacts/app-screenshots/v0.1.0-idle-cat.png)
+- [Material 3 设置与版本信息](../artifacts/app-screenshots/v0.1.0-settings.png)
 
 ## 4. 关键问题、根因与解决方法
 
@@ -319,14 +325,14 @@ adb logcat -s WezTermAndroid
 
 ## 6. 发布流程
 
-首个版本采用 GitHub prerelease，资产名称明确包含 ABI 和 debug 签名性质。维护步骤：
+首个版本采用普通 GitHub Release，资产名称明确包含 ABI 和 debug 签名性质。维护步骤：
 
 1. 更新 `versionCode` / `versionName`、README、架构与维护文档；
 2. 运行第 5 节的 Gradle、Rust 和真机检查；
 3. 检查 APK 可安装、版本信息正确、资产大小合理；
 4. 提交并推送 `main`；
-5. 使用 `gh release create` 创建 tag、prerelease 和 APK 资产；
-6. 用 `gh release view` 检查 tag、target、prerelease 状态和资产下载地址；
+5. 使用 `gh release create` 创建 tag、正式 Release 和 APK 资产；
+6. 用 `gh release view` 检查 tag、target、非草稿状态、非 prerelease 状态和资产下载地址；
 7. 确认工作树干净且本地 `main` 与 `origin/main` 一致。
 
 在 release signing、Android Keystore、更多 ABI 和长期网络回归完成前，不把 debug APK

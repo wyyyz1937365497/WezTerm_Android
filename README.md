@@ -7,10 +7,18 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.1.0` Developer Preview。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.1.0`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
-![Android 15 上的 WezTerm cell、HarfBuzz/FreeType 与 wgpu atlas](artifacts/p1b-font-atlas/android15-harfbuzz-freetype-atlas.png)
+## 应用截图
+
+### SSHMUX、动态标题与固定终端键盘
+
+![Android 15 上的 SSHMUX、动态标题、中文字符与固定终端键盘](artifacts/app-screenshots/v0.1.0-mux-keyboard.png)
+
+| 无连接像素猫 | Material 3 设置页 |
+|---|---|
+| ![纯黑终端背景上的像素猫](artifacts/app-screenshots/v0.1.0-idle-cat.png) | ![Material 3 深色设置页](artifacts/app-screenshots/v0.1.0-settings.png) |
 
 ## 已实现
 
@@ -34,7 +42,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.1.0-arm64-debug.apk`。该包为 Developer Preview：
+下载 `wezterm-android-v0.1.0-arm64-debug.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - 使用 Android debug 签名；
