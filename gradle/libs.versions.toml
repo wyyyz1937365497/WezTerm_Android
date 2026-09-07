@@ -6,6 +6,7 @@ junitVersion = "1.1.5"
 espressoCore = "3.7.0"
 lifecycleRuntimeKtx = "2.6.1"
 activity = "1.13.0"
+appcompat = "1.7.0"
 kotlin = "2.2.10"
 material = "1.14.0"
 
@@ -16,6 +17,7 @@ androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "j
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
 androidx-activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
 [plugins]

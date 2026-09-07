@@ -1,35 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">WezTerm Android</string>
+    <string name="app_name" translatable="false">WezTerm Android</string>
     <string name="renderer_starting">P2 · starting native terminal…</string>
     <string name="renderer_ready">P2 transport · %1$s</string>
     <string name="renderer_failed">Native renderer failed · %1$s</string>
     <string name="terminal_surface_description">WezTerm terminal surface</string>
-    <string name="history_live_button">↓ 实时</string>
-    <string name="history_live_description">返回终端实时底部</string>
-    <string name="history_offset">历史记录 · 位于实时底部上方 %1$d 行</string>
-    <string name="history_live_bottom">已返回终端实时底部</string>
-    <string name="selection_copy">复制</string>
-    <string name="selection_paste">粘贴</string>
-    <string name="selection_select_all">全选当前屏</string>
-    <string name="selection_cancel">取消</string>
-    <string name="selection_mode_active">选择模式 · 拖动可扩展选区</string>
-    <string name="selection_empty">当前选区没有可复制文本</string>
-    <string name="selection_clipboard_label">WezTerm 终端文本</string>
-    <string name="selection_clipboard_empty">剪贴板中没有可粘贴文本</string>
-    <string name="selection_copied">已复制 %1$d 个字符</string>
-    <string name="selection_pasted">已粘贴 %1$d 个字符到终端</string>
-    <string name="selection_paste_failed">粘贴失败：%1$s</string>
-    <string name="keyboard_toggle">⌨</string>
+
+    <string name="history_live_button">↓ Live</string>
+    <string name="history_live_description">Return to the live bottom of the terminal</string>
+    <string name="history_offset">History · %1$d lines above the live bottom</string>
+    <string name="history_live_bottom">Returned to the live bottom</string>
+
+    <string name="selection_copy">Copy</string>
+    <string name="selection_paste">Paste</string>
+    <string name="selection_select_all">Select visible screen</string>
+    <string name="selection_cancel">Cancel</string>
+    <string name="selection_mode_active">Selection mode · drag to extend the selection</string>
+    <string name="selection_empty">The selection has no text to copy</string>
+    <string name="selection_clipboard_label">WezTerm terminal text</string>
+    <string name="selection_clipboard_empty">The clipboard has no text to paste</string>
+    <string name="selection_copied">Copied %1$d characters</string>
+    <string name="selection_pasted">Pasted %1$d characters into the terminal</string>
+    <string name="selection_paste_failed">Paste failed: %1$s</string>
+
+    <string name="keyboard_toggle" translatable="false">⌨</string>
     <string name="keyboard_toggle_description">Show or hide terminal keyboard</string>
     <string name="keyboard_panel_description">Fixed bottom terminal keyboard</string>
-    <string name="keyboard_title">EN terminal keys · one-shot modifiers</string>
-    <string name="keyboard_chinese_input">中文输入</string>
+    <string name="keyboard_title">English terminal keys · one-shot modifiers</string>
+    <string name="keyboard_chinese_input">System IME text</string>
     <string name="keyboard_hide">Hide</string>
-    <string name="keyboard_composer_hint">使用系统输入法编辑，发送后写入终端</string>
-    <string name="keyboard_send">发送</string>
-    <string name="keyboard_send_failed">输入发送失败：%1$s</string>
-    <string name="keyboard_sent">已向远程 PTY 发送 %1$d 个字符</string>
-    <string name="ssh_connect">SSH</string>
+    <string name="keyboard_composer_hint">Compose with the system input method, then send the text to the terminal</string>
+    <string name="keyboard_send">Send</string>
+    <string name="keyboard_send_failed">Could not send input: %1$s</string>
+    <string name="keyboard_sent">Sent %1$d characters to the remote PTY</string>
+
+    <string name="ssh_connect" translatable="false">SSH</string>
     <string name="ssh_disconnect">Disconnect</string>
     <string name="ssh_host">Host or IP address</string>
     <string name="ssh_user">Username</string>
@@ -62,7 +67,8 @@
     <string name="ssh_authentication_sent">Authentication response sent…</string>
     <string name="ssh_failed">SSH failed: %1$s</string>
     <string name="ssh_error_title">SSH error</string>
-    <string name="mux_attach">MUX</string>
+
+    <string name="mux_attach" translatable="false">MUX</string>
     <string name="mux_connection_title">Attach remote WezTerm mux</string>
     <string name="mux_connection_boundary">This mode requires key authentication and a compatible WezTerm on the remote host. It does not start a local shell or local mux server.</string>
     <string name="mux_connection_boundary_debug_identity">The app-private debug identity will be used to attach a compatible remote WezTerm mux. Detaching preserves remote tabs.</string>
@@ -96,12 +102,29 @@
     <string name="mux_detach_failed">SSHMUX detach reported an error: %1$s</string>
     <string name="mux_failed">SSHMUX failed: %1$s</string>
     <string name="mux_error_title">SSHMUX error</string>
-    <string name="mux_reconnecting">正在自动重附加 %1$s@%2$s:%3$d…</string>
-    <string name="mux_reconnect_scheduled">连接中断：%1$s；%2$d 秒后重试</string>
-    <string name="mux_reconnect_after_error">SSHMUX 中断，准备自动恢复：%1$s</string>
-    <string name="mux_reconnect_cleaning_up">正在清理失效连接，远程标签页保持运行…</string>
-    <string name="mux_reconnect_missing_endpoint">无法自动重附加：保存的连接参数不完整</string>
-    <string name="mux_reconnect_cancelled">已停止自动重附加</string>
-    <string name="mux_stop_reconnect">停止重连</string>
-    <string name="mux_connection_lost">远程连接已断开</string>
+    <string name="mux_reconnecting">Automatically reattaching to %1$s@%2$s:%3$d…</string>
+    <string name="mux_reconnect_scheduled">Connection lost: %1$s; retrying in %2$d seconds</string>
+    <string name="mux_reconnect_after_error">SSHMUX disconnected; preparing automatic recovery: %1$s</string>
+    <string name="mux_reconnect_cleaning_up">Cleaning up the stale connection; remote tabs remain active…</string>
+    <string name="mux_reconnect_missing_endpoint">Automatic reattach is unavailable because the saved endpoint is incomplete</string>
+    <string name="mux_reconnect_cancelled">Automatic reattach stopped</string>
+    <string name="mux_stop_reconnect">Stop retry</string>
+    <string name="mux_connection_lost">Remote connection lost</string>
+
+    <string name="settings_button" translatable="false">⚙</string>
+    <string name="settings_button_description">Open settings</string>
+    <string name="settings_back" translatable="false">←</string>
+    <string name="settings_back_description">Return to terminal</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_language_title">App language</string>
+    <string name="settings_language_summary">Choose the language used by the terminal client interface.</string>
+    <string name="settings_language_system">Follow system</string>
+    <string name="settings_language_english">English</string>
+    <string name="settings_language_simplified_chinese">简体中文</string>
+    <string name="settings_developer_title">Developer</string>
+    <string name="settings_developer_name" translatable="false">wyyyz1937365497</string>
+    <string name="settings_developer_description">WezTerm Android is a native Android terminal client that reuses WezTerm terminal, font, rendering, SSH and mux components.</string>
+    <string name="settings_version">Version %1$s</string>
+    <string name="settings_open_source">View source on GitHub</string>
+    <string name="settings_project_url" translatable="false">https://github.com/wyyyz1937365497/WezTerm_Android</string>
 </resources>

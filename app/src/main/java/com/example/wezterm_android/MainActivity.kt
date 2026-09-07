@@ -2,6 +2,7 @@ package com.example.wezterm_android
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Rect
@@ -19,9 +20,9 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -37,7 +38,7 @@ private data class DialogTextField(
     val input: TextInputEditText,
 )
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var sshButton: Button
     private lateinit var muxButton: Button
@@ -49,7 +50,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var muxNextButton: Button
     private lateinit var muxNewButton: Button
     private lateinit var muxCloseButton: Button
-    private lateinit var muxDetachButton: Button
     private lateinit var terminalSurface: TerminalSurfaceView
     private lateinit var terminalKeyboard: TerminalKeyboardView
 
@@ -242,6 +242,7 @@ class MainActivity : ComponentActivity() {
         }
         muxButton = Button(this).apply {
             text = getString(R.string.mux_attach)
+            contentDescription = getString(R.string.mux_connection_title)
             textSize = 11f
             minHeight = 0
             minWidth = 0
@@ -268,6 +269,17 @@ class MainActivity : ComponentActivity() {
             isEnabled = false
             setOnClickListener { terminalKeyboard.togglePanel() }
         }
+        val settingsButton = Button(this).apply {
+            text = getString(R.string.settings_button)
+            contentDescription = getString(R.string.settings_button_description)
+            textSize = 14f
+            minHeight = 0
+            minWidth = 0
+            setPadding(dp(10), dp(2), dp(10), dp(2))
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+            }
+        }
         historyBottomButton = Button(this).apply {
             text = getString(R.string.history_live_button)
             contentDescription = getString(R.string.history_live_description)
@@ -284,6 +296,13 @@ class MainActivity : ComponentActivity() {
         )
         statusBar.addView(
             historyBottomButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        statusBar.addView(
+            settingsButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -341,12 +360,6 @@ class MainActivity : ComponentActivity() {
                 NativeBridge.nativeMuxActivateRelative(1)
             }
         }
-        muxDetachButton = compactToolbarButton(
-            getString(R.string.mux_detach),
-            R.string.mux_detach_description,
-        ) {
-            showMuxDetachConfirmation()
-        }
         muxToolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -361,7 +374,6 @@ class MainActivity : ComponentActivity() {
             addView(muxNewButton)
             addView(muxCloseButton)
             addView(muxNextButton)
-            addView(muxDetachButton)
         }
         contentColumn.addView(
             muxToolbar,
@@ -1170,6 +1182,12 @@ class MainActivity : ComponentActivity() {
                 getString(R.string.mux_stop_reconnect)
             else -> getString(R.string.mux_attach)
         }
+        muxButton.contentDescription = when {
+            muxActive -> getString(R.string.mux_detach_description)
+            muxReconnectScheduled || muxAutoReconnectStarting ->
+                getString(R.string.mux_stop_reconnect)
+            else -> getString(R.string.mux_connection_title)
+        }
         muxButton.isEnabled = !sshActive && !muxCommandInFlight
         muxButton.alpha = if (muxButton.isEnabled) 1f else 0.45f
 
@@ -1179,13 +1197,11 @@ class MainActivity : ComponentActivity() {
         muxNextButton.isEnabled = canSwitch
         muxNewButton.isEnabled = muxReady && !muxCommandInFlight
         muxCloseButton.isEnabled = muxReady && muxTabCount > 0 && !muxCommandInFlight
-        muxDetachButton.isEnabled = muxReady && !muxCommandInFlight
         listOf(
             muxPreviousButton,
             muxNextButton,
             muxNewButton,
             muxCloseButton,
-            muxDetachButton,
         ).forEach { button -> button.alpha = if (button.isEnabled) 1f else 0.45f }
     }
 
