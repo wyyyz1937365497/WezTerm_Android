@@ -1055,6 +1055,13 @@ fn feed_terminal_and_render(bytes: &[u8]) -> Result<()> {
 }
 
 fn pump_mux_terminal() -> Result<bool> {
+    // SurfaceView can disappear before Activity.onStop removes the Kotlin poll
+    // callback. Do not let a background poll mark a snapshot as presented when
+    // there is no renderer; otherwise the replacement Surface will suppress
+    // the identical snapshot and remain on the disconnected placeholder.
+    if !RENDERER.with(|slot| slot.borrow().is_some()) {
+        return Ok(false);
+    }
     let viewport_offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
     let snapshot = {
         let slot = mux_session_slot()
@@ -1081,6 +1088,28 @@ fn pump_mux_terminal() -> Result<bool> {
         render_terminal_snapshot(&snapshot.terminal)?;
     }
     Ok(changed)
+}
+
+fn report_mux_transport_failure(message: String) {
+    // Only the first failed operation for an attached session should enqueue a
+    // reconnect event. Clearing readiness immediately also stops the 100 ms UI
+    // poll from producing an unbounded stream of identical errors.
+    if !MUX_READY.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let reported = mux_session_slot()
+        .lock()
+        .map_err(|_| anyhow!("SSHMUX session lock is poisoned"))
+        .and_then(|slot| {
+            let session = slot
+                .as_ref()
+                .ok_or_else(|| anyhow!("SSHMUX session disappeared after transport failure"))?;
+            session.report_transport_failure(message);
+            Ok(())
+        });
+    if let Err(error) = reported {
+        log::error!("unable to report SSHMUX transport failure: {error:#}");
+    }
 }
 
 fn refresh_terminal_view() -> Result<usize> {
@@ -1131,6 +1160,27 @@ fn point_from_surface_pixels(x: f32, y: f32) -> Option<CellPoint> {
     Some(CellPoint {
         row: (y / cell_height).floor() as usize,
         column: (x / cell_width).floor() as usize,
+    })
+}
+
+fn clamped_point_from_surface_pixels(x: f32, y: f32) -> Option<CellPoint> {
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let density_dpi =
+        RENDERER.with(|slot| slot.borrow().as_ref().map(|renderer| renderer.density_dpi))?;
+    let [cell_width, cell_height] = cell_size(density_dpi);
+    let (columns, rows) = LAST_VIEW_SNAPSHOT.with(|last| {
+        last.borrow()
+            .as_ref()
+            .map(|snapshot| (snapshot.columns, snapshot.rows))
+    })?;
+    if columns == 0 || rows == 0 {
+        return None;
+    }
+    Some(CellPoint {
+        row: ((y.max(0.0) / cell_height).floor() as usize).min(rows - 1),
+        column: ((x.max(0.0) / cell_width).floor() as usize).min(columns - 1),
     })
 }
 
@@ -1309,6 +1359,50 @@ fn write_remote_pty(bytes: &[u8]) -> Result<bool> {
     Ok(false)
 }
 
+fn send_remote_mouse_wheel(x: f32, y: f32, delta: isize) -> Result<bool> {
+    if delta == 0 {
+        return Ok(false);
+    }
+    let point = clamped_point_from_surface_pixels(x, y)
+        .ok_or_else(|| anyhow!("terminal surface has no addressable cells"))?;
+
+    if MUX_READY.load(Ordering::SeqCst) {
+        let slot = mux_session_slot()
+            .lock()
+            .map_err(|_| anyhow!("SSHMUX session lock is poisoned"))?;
+        let session = slot
+            .as_ref()
+            .ok_or_else(|| anyhow!("there is no active SSHMUX session"))?;
+        session.mouse_wheel(point.column, point.row, delta)?;
+        drop(slot);
+        reset_view_interaction();
+        log::debug!(
+            "sent SSHMUX mouse wheel delta={} cell={},{}",
+            delta,
+            point.column,
+            point.row,
+        );
+        return Ok(true);
+    }
+
+    // The standalone SSH transport does not expose a remote Pane object yet.
+    // Use cursor keys so the remote application still owns the gesture;
+    // SSHMUX uses the real Pane::mouse_event path above and therefore
+    // preserves every negotiated mouse-reporting mode.
+    let key_code = if delta > 0 { 20 } else { 19 };
+    let key_bytes = android_key_bytes(key_code, 0, 0);
+    let mut bytes = Vec::with_capacity(key_bytes.len() * delta.unsigned_abs().min(32));
+    for _ in 0..delta.unsigned_abs().min(32) {
+        bytes.extend_from_slice(&key_bytes);
+    }
+    let sent = write_remote_pty(&bytes)?;
+    if sent {
+        reset_view_interaction();
+        log::debug!("sent plain-SSH scroll-key delta={delta}");
+    }
+    Ok(sent)
+}
+
 fn ffi_guard(operation: &str, callback: impl FnOnce() -> Result<()>) -> jboolean {
     init_logging();
     match catch_unwind(AssertUnwindSafe(callback)) {
@@ -1373,6 +1467,17 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSurf
         LAST_VIEW_SNAPSHOT.with(|last| {
             last.borrow_mut().replace(terminal.clone());
         });
+        // LAST_MUX_SNAPSHOT describes what was presented to the old Surface,
+        // not to this new Vulkan swapchain. Force one fresh remote snapshot so
+        // a still-live SSHMUX session immediately replaces the idle model.
+        LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
+        if MUX_READY.load(Ordering::SeqCst) {
+            if let Err(error) = pump_mux_terminal() {
+                let message = format!("{error:#}");
+                log::warn!("unable to restore SSHMUX terminal after Surface creation: {message}");
+                report_mux_transport_failure(message);
+            }
+        }
         // Surface ownership is already valid at this point. A transient
         // network/SSHMUX resize error must not report the renderer as absent;
         // doing so desynchronizes Kotlin from the native producer and makes a
@@ -1456,6 +1561,9 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSurf
     let _ = ffi_guard("nativeSurfaceDestroyed", || {
         let renderer = RENDERER.with(|slot| slot.borrow_mut().take());
         drop(renderer);
+        // Snapshot equality is meaningful only for the Surface on which the
+        // snapshot was rendered. The next Surface must receive a full frame.
+        LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
         VIEW_INTERACTION.with(|interaction| interaction.borrow_mut().selection = None);
         log::info!("destroyed wgpu Surface while retaining the WezTerm terminal model");
         Ok(())
@@ -1640,6 +1748,40 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeKeyE
         }
         if let Err(error) = write_remote_pty(&bytes) {
             log::warn!("unable to send key to remote PTY: {:#}", error);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeRemoteMouseWheel(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    x: jfloat,
+    y: jfloat,
+    delta: jint,
+) -> jboolean {
+    init_logging();
+    let mux_was_ready = MUX_READY.load(Ordering::SeqCst);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        send_remote_mouse_wheel(x, y, delta as isize)
+    }));
+    match outcome {
+        Ok(Ok(true)) => JNI_TRUE,
+        Ok(Ok(false)) => JNI_FALSE,
+        Ok(Err(error)) => {
+            let message = format!("{error:#}");
+            log::warn!("nativeRemoteMouseWheel failed: {message}");
+            if mux_was_ready {
+                report_mux_transport_failure(message);
+            }
+            JNI_FALSE
+        }
+        Err(_) => {
+            log::error!("nativeRemoteMouseWheel panicked");
+            if mux_was_ready {
+                report_mux_transport_failure("nativeRemoteMouseWheel panicked".to_string());
+            }
+            JNI_FALSE
         }
     }
 }
@@ -2055,11 +2197,14 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxP
         Ok(Ok(true)) => JNI_TRUE,
         Ok(Ok(false)) => JNI_FALSE,
         Ok(Err(error)) => {
-            log::error!("nativeMuxPumpTerminal failed: {:#}", error);
+            let message = format!("{error:#}");
+            log::error!("nativeMuxPumpTerminal failed: {message}");
+            report_mux_transport_failure(message);
             JNI_FALSE
         }
         Err(_) => {
             log::error!("nativeMuxPumpTerminal panicked");
+            report_mux_transport_failure("nativeMuxPumpTerminal panicked".to_string());
             JNI_FALSE
         }
     }

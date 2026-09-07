@@ -55,6 +55,10 @@ internal object NativeBridge {
         isDown: Boolean,
     )
 
+    /** Positive deltas scroll down; SSHMUX forwards a real terminal wheel event. */
+    @JvmStatic
+    external fun nativeRemoteMouseWheel(x: Float, y: Float, delta: Int): Boolean
+
     /** Returns null on success or a user-displayable error string. */
     @JvmStatic
     external fun nativeSshStart(

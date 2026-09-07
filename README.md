@@ -50,13 +50,16 @@ P0、P1 与 P2 功能闭环已在 Android 15/API 35 ARM64 真机运行：
 - SSHMUX 控制栏和状态栏同样参与纵向布局，不覆盖终端 Surface；
 - 真机固定键盘布局下 Surface 与键盘在 `y=1266` 精确相接，远端尺寸稳定同步为
   `101x17`；
-- 触摸上下拖动和 fling 可浏览 WezTerm scrollback，状态栏显示距实时底部的行数，
-  `↓ 实时` 可立即回到底部；输入任意内容也会自动回到实时视图；
+- 单指上下拖动和 fling 通过真实 `Pane::mouse_event` 向 SSHMUX 远端发送滚轮事件，
+  由启用鼠标模式或 alternate screen 的 TUI 自行处理；双指上下拖动才浏览客户端
+  WezTerm scrollback，状态栏显示距实时底部的行数，`↓ 实时` 可立即回到底部；
 - 当另一个 WezTerm 客户端把远端 pane 保持为更高行数时，Android 视口会按自身
   `101x17` 尺寸从远端物理视口底部取行，避免提示符被裁掉，同时把隐藏行计入历史；
 - 长按终端按词进入选择模式，拖动扩展选区；浮动操作栏支持复制、粘贴、选择当前
   可见屏幕和取消，复制/粘贴已接入 Android 系统剪贴板；
-- Activity 进入后台不会主动 Detach：进程仍存活时保持同一 SSHMUX 连接和 pane；
+- Activity 进入后台不会主动 Detach：进程仍存活且 transport 健康时保持同一 SSHMUX
+  连接和 pane；若上游 `ClientDomain` 已脱离但本地 session handle 仍存在，首次快照失败
+  会触发一次安全清理和自动重附着，不再停留于“DETACH + 像素猫”的伪连接状态；
   若进程或连接丢失，回到前台/冷启动会使用已保存端点和应用私有密钥指数退避重附着；
   用户显式 Detach 会清除自动重附着标志；
 - Android 设置 ↔ 客户端连续 3 轮切换已验证每轮 Surface 销毁、释放、重建和 present；
@@ -151,7 +154,7 @@ MainActivity / TerminalSurfaceView / TerminalKeyboardView
   ├─ Android WindowInsets 与 Surface 生命周期
   ├─ 固定底部英文/符号键盘 + 独立系统 IME 编辑框
   ├─ SSH 端点、host-key 与一次性认证 UI
-  ├─ 触摸回滚、长按选择与 Android 剪贴板
+  ├─ 单指远端滚轮、双指回滚、长按选择与 Android 剪贴板
   ├─ SSHMUX 标签工具栏、安全分离与自动重附着
   └─ NativeBridge JNI
        ↓
@@ -171,7 +174,7 @@ wezterm-android-core  wezterm-android-font  wezterm-android-ssh  wezterm-android
 
 P2/P3 当前边界：atlas 每个 terminal cell 仍只提交首个 shaped glyph；组合字符
 被 HarfBuzz 合成为一个 glyph，但复杂 Indic/ZWJ cluster 尚未覆盖。彩色 emoji 仍显示
-tofu，粗体/斜体 face 选择、链接点击、Android 原生选择手柄和双指手势尚未完成。
+tofu，粗体/斜体 face 选择、链接点击和 Android 原生选择手柄尚未完成。
 SSHMUX 当前要求应用私有密钥和已信任的 host key；首次信任、密码/交互式认证、
 TLS domain 和 Android Keystore 尚未完成。当前后台语义是“进程存活则保持，进程被
 系统结束则前台自动重附着”，不是前台服务式无限后台保活；蜂窝/Wi-Fi 切换与 Doze

@@ -74,12 +74,13 @@ cell 内容，而不是 P0 网格 shader。
 
 - 固定底部英文/符号/特殊键盘 — PASS；
 - 独立中文 composing 编辑框与整串 UTF-8 发送 — PASS；
-- WezTerm scrollback 触摸拖动、fling、历史位置提示与一键回到底部 — PASS；
+- 单指通过 WezTerm `Pane::mouse_event` 向远端 TUI 发送滚轮事件 — PASS；
+- 双指拖动浏览 WezTerm scrollback、历史位置提示与一键回到底部 — PASS；
 - 长按按词选择、拖动扩选和选择可见屏幕 — PASS；
 - Android 系统剪贴板复制/粘贴 — PASS；
 - 多客户端远端行数不一致时的 Android 底部对齐视口 — PASS；
 - 链接识别与点击；
-- Android 原生选择手柄与双指手势；
+- Android 原生选择手柄；
 - Esc/Ctrl/Alt/Tab/方向键辅助栏；
 - 横竖屏、分屏、软键盘和 Insets 专项测试。
 
@@ -91,6 +92,7 @@ cell 内容，而不是 P0 网格 shader。
 
 - SSHMUX 上游客户端复用、标签控制、安全分离与重新附着 — ANDROID 15 RUNTIME PASS；
 - Activity 后台且进程存活时保持连接 — ANDROID 15 RUNTIME PASS；
+- 后台 transport 脱离但 session handle 残留时自动检测、安全清理并重附着 — ANDROID 15 RUNTIME PASS；
 - 跨应用 Surface producer 释放/重建与键盘 Resize 压力 — ANDROID 15 RUNTIME PASS；
 - 前台网络故障指数退避重连、冷启动自动重附着 — ANDROID 15 RUNTIME PASS；
 - 显式 Detach 关闭自动重附着 — ANDROID 15 RUNTIME PASS；

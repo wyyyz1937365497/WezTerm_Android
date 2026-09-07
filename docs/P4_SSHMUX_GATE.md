@@ -136,6 +136,15 @@ Surface 和远端 pane 每轮均精确切换 `101x30 ↔ 101x17`。再连续 3 �
 configured native surface 2800x932 → P1-B ready`；最终远端内容、光标与键盘实际可见，
 没有 `-22`、Surface panic 或 SSHMUX 重建。
 
+随后又确认了第三个独立边界：某些跨应用切换会让上游 `ClientDomain` 进入
+`not attached`，但 JNI 中的 session handle 与 `MUX_READY` 仍然保留。旧实现因此继续
+显示 `DETACH`，每 100 ms 快照均失败，重建 Surface 只显示空闲像素猫。当前实现会把
+首次快照失败转换为一次性的 `MuxEvent::Error`，立即清除 ready 状态，在 UI 线程之外
+安全分离失效 runtime，再按已有策略自动重附着；同时 Surface 销毁会使上一张 mux
+快照缓存失效，新 Surface 必须完整重绘。Android 设置与客户端往返两轮均在同一 PID
+内得到“1 次失败检测、1 次安全分离、1 次重新附着”，最终恢复原 `tab 1/2`，没有
+错误风暴或像素猫残留。
+
 ## 输入、尺寸与布局
 
 普通 SSH 和 SSHMUX 共用现有键盘入口：英文/符号/特殊键写入 active pane，中文在

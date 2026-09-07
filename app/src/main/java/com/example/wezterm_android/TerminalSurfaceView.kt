@@ -10,7 +10,6 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import kotlin.math.abs
 
 /**
  * Android owns this view and its Surface lifecycle. Rust owns only the renderer
@@ -26,12 +25,15 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
 
     private var nativeSurfaceAttached = false
     private var selectionActive = false
-    private var scrollRemainderPx = 0f
+    private var historyGestureActive = false
     private var viewportOffset = 0
     private var selectionX = 0f
     private var selectionY = 0f
     private val terminalCellHeightPx: Float
         get() = 21f * resources.displayMetrics.density
+    private val scrollAccumulator by lazy {
+        TerminalScrollAccumulator(terminalCellHeightPx)
+    }
 
     private val gestureDetector =
         GestureDetector(
@@ -39,17 +41,17 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(event: MotionEvent): Boolean {
                     requestFocus()
-                    scrollRemainderPx = 0f
+                    scrollAccumulator.reset()
                     return true
                 }
 
                 override fun onSingleTapUp(event: MotionEvent): Boolean {
-                    if (!selectionActive) onTerminalTapped?.invoke()
+                    if (!selectionActive && !historyGestureActive) onTerminalTapped?.invoke()
                     return true
                 }
 
                 override fun onLongPress(event: MotionEvent) {
-                    if (!nativeSurfaceAttached) return
+                    if (!nativeSurfaceAttached || historyGestureActive) return
                     if (NativeBridge.nativeSelectionStart(event.x, event.y)) {
                         selectionActive = true
                         selectionX = event.x
@@ -66,10 +68,19 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
                     distanceY: Float,
                 ): Boolean {
                     if (selectionActive || !nativeSurfaceAttached) return true
-                    // Direct manipulation: dragging content down reveals older
-                    // rows; dragging it up returns towards the live bottom.
-                    scrollRemainderPx += -distanceY
-                    dispatchAccumulatedScroll()
+                    val destination = if (historyGestureActive || current.pointerCount >= 2) {
+                        TerminalScrollDestination.HISTORY
+                    } else {
+                        TerminalScrollDestination.REMOTE
+                    }
+                    val steps = scrollAccumulator.consume(distanceY, destination)
+                    if (steps != 0) {
+                        when (destination) {
+                            TerminalScrollDestination.REMOTE ->
+                                dispatchRemoteWheel(current.x, current.y, steps)
+                            TerminalScrollDestination.HISTORY -> dispatchScrollRows(steps)
+                        }
+                    }
                     return true
                 }
 
@@ -80,11 +91,18 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
                     velocityY: Float,
                 ): Boolean {
                     if (selectionActive || !nativeSurfaceAttached) return true
-                    val rows =
-                        (velocityY / (terminalCellHeightPx * 7f))
-                            .toInt()
-                            .coerceIn(-30, 30)
-                    if (rows != 0) dispatchScrollRows(rows)
+                    val fingerSteps = (velocityY / (terminalCellHeightPx * 7f))
+                        .toInt()
+                        .coerceIn(-30, 30)
+                    if (fingerSteps != 0) {
+                        if (historyGestureActive || current.pointerCount >= 2) {
+                            dispatchScrollRows(fingerSteps)
+                        } else {
+                            // Upward finger velocity is negative but represents
+                            // wheel-down input to the remote application.
+                            dispatchRemoteWheel(current.x, current.y, -fingerSteps)
+                        }
+                    }
                     return true
                 }
             },
@@ -140,11 +158,29 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                historyGestureActive = false
+                scrollAccumulator.reset()
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (event.pointerCount >= 2) {
+                    historyGestureActive = true
+                    scrollAccumulator.reset()
+                }
+            }
+        }
         gestureDetector.onTouchEvent(event)
         if (selectionActive && event.actionMasked == MotionEvent.ACTION_MOVE) {
             selectionX = event.x.coerceIn(0f, width.toFloat().coerceAtLeast(1f) - 1f)
             selectionY = event.y.coerceIn(0f, height.toFloat().coerceAtLeast(1f) - 1f)
             NativeBridge.nativeSelectionUpdate(selectionX, selectionY)
+        }
+        if (event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            historyGestureActive = false
+            scrollAccumulator.reset()
         }
         return true
     }
@@ -199,12 +235,11 @@ internal class TerminalSurfaceView(context: Context) : SurfaceView(context), Sur
         onViewportOffsetChanged?.invoke(0)
     }
 
-    private fun dispatchAccumulatedScroll() {
-        val cellHeight = terminalCellHeightPx.coerceAtLeast(1f)
-        if (abs(scrollRemainderPx) < cellHeight) return
-        val rows = (scrollRemainderPx / cellHeight).toInt()
-        scrollRemainderPx -= rows * cellHeight
-        dispatchScrollRows(rows)
+    private fun dispatchRemoteWheel(x: Float, y: Float, steps: Int) {
+        if (steps == 0) return
+        if (NativeBridge.nativeRemoteMouseWheel(x, y, steps)) {
+            noteInputReturnedToLiveBottom()
+        }
     }
 
     private fun dispatchScrollRows(rows: Int) {

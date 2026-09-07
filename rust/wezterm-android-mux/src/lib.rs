@@ -26,7 +26,9 @@ use wezterm_android_ssh::{AndroidSshConfig, SshEndpoint};
 use wezterm_client::domain::{ClientDomain, ClientDomainConfig};
 use wezterm_client::pane::ClientPane;
 use wezterm_term::color::{ColorAttribute, ColorPalette, SrgbaTuple};
-use wezterm_term::{CellAttributes, Intensity, TerminalSize};
+use wezterm_term::{
+    CellAttributes, Intensity, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, TerminalSize,
+};
 
 pub const WEZTERM_REVISION: &str = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
@@ -165,6 +167,12 @@ enum RuntimeMessage {
 enum RuntimeCommand {
     Snapshot(usize, Sender<Result<Option<MuxViewSnapshot>, String>>),
     Write(Vec<u8>, Sender<Result<(), String>>),
+    MouseWheel {
+        column: usize,
+        row: usize,
+        delta: isize,
+        reply: Sender<Result<(), String>>,
+    },
     Resize(TerminalSize, Sender<Result<(), String>>),
     Tabs(Sender<Result<Vec<MuxTabInfo>, String>>),
     ActivateRelative(isize, Sender<Result<(), String>>),
@@ -187,6 +195,7 @@ struct RuntimeState {
 /// client runtime; the remote panes survive because the domain detaches first.
 pub struct AndroidMuxSession {
     runtime_tx: Sender<RuntimeMessage>,
+    event_tx: Sender<MuxEvent>,
     events: Receiver<MuxEvent>,
     stopped: Receiver<()>,
     join: Option<JoinHandle<()>>,
@@ -205,6 +214,7 @@ impl AndroidMuxSession {
         let (event_tx, event_rx) = mpsc::channel();
         let (stopped_tx, stopped_rx) = mpsc::channel();
         let thread_tx = runtime_tx.clone();
+        let session_event_tx = event_tx.clone();
         let join = std::thread::Builder::new()
             .name("wezterm-android-mux".into())
             .spawn(move || run_runtime(endpoint, size, thread_tx, runtime_rx, event_tx, stopped_tx))
@@ -215,6 +225,7 @@ impl AndroidMuxSession {
 
         Ok(Self {
             runtime_tx,
+            event_tx: session_event_tx,
             events: event_rx,
             stopped: stopped_rx,
             join: Some(join),
@@ -223,6 +234,14 @@ impl AndroidMuxSession {
 
     pub fn try_next_event(&self) -> Option<MuxEvent> {
         self.events.try_recv().ok()
+    }
+
+    /// Reports a transport failure discovered by the JNI-facing snapshot
+    /// path. Upstream can move a ClientDomain out of Attached without emitting
+    /// an Android wrapper event, so the UI must not infer health solely from
+    /// the continued existence of this session handle.
+    pub fn report_transport_failure(&self, message: String) {
+        let _ = self.event_tx.send(MuxEvent::Error { message });
     }
 
     pub fn snapshot(&self) -> anyhow::Result<Option<MuxViewSnapshot>> {
@@ -250,6 +269,22 @@ impl AndroidMuxSession {
                 tx,
             )))?;
         recv_result(rx, "write")
+    }
+
+    /// Sends a terminal mouse-wheel event at the touched cell. Positive
+    /// deltas scroll down and negative deltas scroll up. The remote WezTerm
+    /// terminal decides whether to encode mouse reporting, use alternate-
+    /// screen cursor keys, or ignore the event on a normal shell screen.
+    pub fn mouse_wheel(&self, column: usize, row: usize, delta: isize) -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::channel();
+        self.runtime_tx
+            .send(RuntimeMessage::Command(RuntimeCommand::MouseWheel {
+                column,
+                row,
+                delta,
+                reply: tx,
+            }))?;
+        recv_result(rx, "mouse wheel")
     }
 
     pub fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
@@ -505,6 +540,15 @@ impl RuntimeState {
                 let result = self.write(&bytes).map_err(display_error);
                 let _ = reply.send(result);
             }
+            RuntimeCommand::MouseWheel {
+                column,
+                row,
+                delta,
+                reply,
+            } => {
+                let result = self.mouse_wheel(column, row, delta).map_err(display_error);
+                let _ = reply.send(result);
+            }
             RuntimeCommand::Resize(size, reply) => {
                 self.size = size;
                 let result = self.resize_active().map_err(display_error);
@@ -622,6 +666,18 @@ impl RuntimeState {
         writer.write_all(bytes)?;
         writer.flush()?;
         Ok(())
+    }
+
+    fn mouse_wheel(&mut self, column: usize, row: usize, delta: isize) -> anyhow::Result<()> {
+        self.ensure_attached()?;
+        if delta == 0 {
+            return Ok(());
+        }
+        self.ensure_active_pane();
+        let pane = self
+            .active_pane()
+            .ok_or_else(|| anyhow!("no active remote pane"))?;
+        pane.mouse_event(mouse_wheel_event(column, row, delta))
     }
 
     fn activate_relative(&mut self, delta: isize) -> anyhow::Result<()> {
@@ -847,6 +903,22 @@ fn display_error(error: anyhow::Error) -> String {
     format!("{error:#}")
 }
 
+fn mouse_wheel_event(column: usize, row: usize, delta: isize) -> MouseEvent {
+    MouseEvent {
+        kind: MouseEventKind::Press,
+        x: column,
+        y: i64::try_from(row).unwrap_or(i64::MAX),
+        x_pixel_offset: 0,
+        y_pixel_offset: 0,
+        button: if delta > 0 {
+            MouseButton::WheelDown(delta.unsigned_abs())
+        } else {
+            MouseButton::WheelUp(delta.unsigned_abs())
+        },
+        modifiers: KeyModifiers::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,5 +999,43 @@ mod tests {
 
         let clamped = android_viewport(&dimensions, 17, usize::MAX);
         assert_eq!(clamped.top, dimensions.scrollback_top);
+    }
+
+    #[test]
+    fn reported_transport_failure_is_delivered_as_one_mux_event() {
+        let (runtime_tx, runtime_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let session = AndroidMuxSession {
+            runtime_tx,
+            event_tx,
+            events: event_rx,
+            stopped: stopped_rx,
+            join: None,
+        };
+
+        session.report_transport_failure("domain is not attached".to_string());
+        assert_eq!(
+            session.try_next_event(),
+            Some(MuxEvent::Error {
+                message: "domain is not attached".to_string(),
+            }),
+        );
+        assert_eq!(session.try_next_event(), None);
+
+        // Let Drop finish immediately and verify that it still requests the
+        // normal runtime shutdown after the externally reported error.
+        stopped_tx.send(()).unwrap();
+        drop(session);
+        assert!(matches!(runtime_rx.try_recv(), Ok(RuntimeMessage::Stop)));
+    }
+
+    #[test]
+    fn touch_scroll_delta_maps_to_terminal_wheel_direction() {
+        assert_eq!(mouse_wheel_event(4, 7, 3).button, MouseButton::WheelDown(3),);
+        assert_eq!(mouse_wheel_event(4, 7, -2).button, MouseButton::WheelUp(2),);
+        let event = mouse_wheel_event(4, 7, 1);
+        assert_eq!((event.x, event.y), (4, 7));
+        assert_eq!(event.kind, MouseEventKind::Press);
     }
 }
