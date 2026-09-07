@@ -185,6 +185,7 @@ struct RuntimeState {
     mux: Arc<Mux>,
     domain: Arc<ClientDomain>,
     active_pane_id: Option<PaneId>,
+    last_emitted_tabs: Option<Vec<MuxTabInfo>>,
     size: TerminalSize,
     event_tx: Sender<MuxEvent>,
     runtime_tx: Sender<RuntimeMessage>,
@@ -397,6 +398,7 @@ fn run_runtime(
             mux,
             domain,
             active_pane_id: None,
+            last_emitted_tabs: None,
             size,
             event_tx: event_tx.clone(),
             runtime_tx: runtime_tx.clone(),
@@ -497,14 +499,12 @@ impl RuntimeState {
                     let _ = pane.resize(self.size);
                     pane.advise_focus();
                 }
-                let tabs = self.tab_handles();
+                let tabs: Vec<_> = self.tab_handles().into_iter().map(|tab| tab.info).collect();
                 let _ = self.event_tx.send(MuxEvent::Attached {
                     tab_count: tabs.len(),
                     codec_version: codec_version(),
                 });
-                let _ = self.event_tx.send(MuxEvent::TabsChanged {
-                    tabs: tabs.into_iter().map(|tab| tab.info).collect(),
-                });
+                self.emit_tabs_changed_if_needed(&tabs);
             }
             Err(message) => {
                 let _ = self.event_tx.send(MuxEvent::Error { message });
@@ -806,6 +806,12 @@ impl RuntimeState {
         } else {
             viewport.rows
         };
+        // ClientRenderable updates its pane title as part of the adaptive
+        // remote poll driven above. Compare the accompanying tab metadata on
+        // every rendered snapshot so OSC title changes reach Android without
+        // flooding the UI with unchanged 100 ms poll results.
+        let tabs: Vec<_> = self.tab_handles().into_iter().map(|tab| tab.info).collect();
+        self.emit_tabs_changed_if_needed(&tabs);
         Ok(Some(MuxViewSnapshot {
             terminal: TerminalSnapshot {
                 columns,
@@ -817,14 +823,24 @@ impl RuntimeState {
                 max_viewport_offset: viewport.max_offset,
                 wrapped_rows,
             },
-            tabs: self.tab_handles().into_iter().map(|tab| tab.info).collect(),
+            tabs,
         }))
     }
 
     fn emit_tabs_changed(&mut self) {
         self.ensure_active_pane();
-        let tabs = self.tab_handles().into_iter().map(|tab| tab.info).collect();
-        let _ = self.event_tx.send(MuxEvent::TabsChanged { tabs });
+        let tabs: Vec<_> = self.tab_handles().into_iter().map(|tab| tab.info).collect();
+        self.emit_tabs_changed_if_needed(&tabs);
+    }
+
+    fn emit_tabs_changed_if_needed(&mut self, tabs: &[MuxTabInfo]) {
+        if !tabs_differ(self.last_emitted_tabs.as_deref(), tabs) {
+            return;
+        }
+        self.last_emitted_tabs = Some(tabs.to_vec());
+        let _ = self.event_tx.send(MuxEvent::TabsChanged {
+            tabs: tabs.to_vec(),
+        });
     }
 
     fn tab_handles(&self) -> Vec<TabHandle> {
@@ -868,6 +884,10 @@ impl RuntimeState {
 
 struct TabHandle {
     info: MuxTabInfo,
+}
+
+fn tabs_differ(previous: Option<&[MuxTabInfo]>, current: &[MuxTabInfo]) -> bool {
+    previous != Some(current)
 }
 
 fn snapshot_attributes(attrs: &CellAttributes, palette: &ColorPalette) -> CellStyleSnapshot {
@@ -1037,5 +1057,23 @@ mod tests {
         let event = mouse_wheel_event(4, 7, 1);
         assert_eq!((event.x, event.y), (4, 7));
         assert_eq!(event.kind, MouseEventKind::Press);
+    }
+
+    #[test]
+    fn tab_snapshot_detects_dynamic_title_changes_without_repeating_unchanged_state() {
+        let original = vec![MuxTabInfo {
+            tab_id: 1,
+            pane_id: 2,
+            title: "shell".to_string(),
+            active: true,
+        }];
+        assert!(tabs_differ(None, &original));
+        assert!(!tabs_differ(Some(&original), &original));
+
+        let renamed = vec![MuxTabInfo {
+            title: "nvim · main.rs".to_string(),
+            ..original[0].clone()
+        }];
+        assert!(tabs_differ(Some(&original), &renamed));
     }
 }

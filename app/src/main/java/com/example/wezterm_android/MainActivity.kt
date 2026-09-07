@@ -429,7 +429,12 @@ class MainActivity : AppCompatActivity() {
         activityStarted = true
         mainHandler.removeCallbacks(pollSshEvents)
         if (NativeBridge.nativeSshHasSession() && activeChallengeDialog == null) {
-            NativeBridge.nativeSshPendingEvent()?.let(::handleSshEvent)
+            val pendingEvent = NativeBridge.nativeSshPendingEvent()
+            if (pendingEvent != null) {
+                handleSshEvent(pendingEvent)
+            } else if (NativeBridge.nativeSshPtyReady()) {
+                statusText.text = getString(R.string.ssh_pty_ready)
+            }
         }
         if (NativeBridge.nativeMuxReady()) {
             NativeBridge.nativeMuxCurrentTabs()?.let(::restoreMuxTabs)
@@ -722,7 +727,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun restoreMuxTabs(encoded: String) {
         try {
-            applyMuxTabs(JSONArray(encoded), updateStatus = false)
+            applyMuxTabs(JSONArray(encoded))
         } catch (error: Exception) {
             statusText.text = getString(R.string.mux_event_invalid, error.message ?: "JSON")
         }
