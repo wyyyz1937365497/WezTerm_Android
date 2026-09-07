@@ -61,18 +61,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let inside_terminal = pixel.x >= 0.0 && pixel.y >= 0.0 &&
         cell.x < view.terminal_size.x && cell.y < view.terminal_size.y;
 
-    let background = vec3<f32>(0.043, 0.055, 0.078);
+    let background = vec3<f32>(0.0, 0.0, 0.0);
     var color = background;
 
     if inside_terminal {
         let cell_index = cell.y * view.terminal_size.x + cell.x;
         let render_cell = cells.values[cell_index];
         color = render_cell.background.rgb;
-
-        let vertical_line = 1.0 - step(1.0 / view.cell_size.x, within_cell.x);
-        let horizontal_line = 1.0 - step(1.0 / view.cell_size.y, within_cell.y);
-        let grid_line = max(vertical_line, horizontal_line);
-        color = mix(color, vec3<f32>(0.18, 0.22, 0.29), grid_line * 0.16);
 
         let glyph_pixel = within_cell_pixels - render_cell.glyph_origin;
         let inside_glyph = render_cell.flags.x != 0u &&

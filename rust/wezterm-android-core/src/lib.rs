@@ -1,8 +1,42 @@
+use std::fmt::Write;
 use std::sync::Arc;
 use wezterm_term::color::{ColorAttribute, ColorPalette, SrgbaTuple};
 use wezterm_term::{CellAttributes, Intensity, Terminal, TerminalConfiguration, TerminalSize};
 
 pub const UPSTREAM_WEZTERM_REVISION: &str = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b";
+
+const IDLE_CAT_ART: &[&str] = &[
+    "      ▄▄▄         ▄▄▄      ",
+    "     █▀  ▀▄▄▄▄▄▀  ▀█     ",
+    "    █               █    ",
+    "   █                 █   ",
+    "   █    ▀       ▀    █   ",
+    "   █        ▄        █   ",
+    " ▀▀█      ▀███▀      █▀▀ ",
+    "    ▀▄             ▄▀    ",
+    "      ▀▄▄▄▄▄▄▄▄▄▄▄▀      ",
+];
+
+/// Build the ANSI payload for the disconnected screen. Keeping the artwork in
+/// the terminal stream means it is rendered by the same WezTerm cell, shaping,
+/// and glyph-atlas path as a remote session rather than by an Android overlay.
+pub fn idle_cat_ansi(columns: usize, rows: usize) -> Vec<u8> {
+    let columns = columns.max(1);
+    let rows = rows.max(1);
+    let visible_height = IDLE_CAT_ART.len().min(rows);
+    let top = rows.saturating_sub(visible_height) / 2;
+    let mut ansi = String::from("\x1b[0m\x1b[48;2;0;0;0m\x1b[2J\x1b[38;2;255;183;77m");
+
+    for (index, source_line) in IDLE_CAT_ART.iter().take(visible_height).enumerate() {
+        let line: String = source_line.chars().take(columns).collect();
+        let line_width = line.chars().count();
+        let left = columns.saturating_sub(line_width) / 2;
+        write!(ansi, "\x1b[{};{}H{}", top + index + 1, left + 1, line)
+            .expect("writing to a String cannot fail");
+    }
+    ansi.push_str("\x1b[0m");
+    ansi.into_bytes()
+}
 
 /// Encode the Android key-code subset exposed by the in-app and hardware
 /// keyboards into the byte sequences expected by an xterm-compatible PTY.
@@ -82,7 +116,7 @@ impl TerminalConfiguration for AndroidTerminalConfiguration {
 
 fn android_palette() -> ColorPalette {
     let mut palette = ColorPalette::default();
-    palette.background = SrgbaTuple(11.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0, 1.0);
+    palette.background = SrgbaTuple(0.0, 0.0, 0.0, 1.0);
     palette.foreground = SrgbaTuple(214.0 / 255.0, 224.0 / 255.0, 240.0 / 255.0, 1.0);
     palette
 }
@@ -407,6 +441,32 @@ mod tests {
         let snapshot = model.snapshot();
         assert_eq!((snapshot.columns, snapshot.rows), (20, 6));
         assert!(snapshot.cells.iter().any(|cell| cell.text == "p"));
+    }
+
+    #[test]
+    fn centers_idle_cat_on_a_pure_black_terminal() {
+        let mut model = TerminalModel::new(40, 20, 400, 400, 160);
+        model.feed(idle_cat_ansi(40, 20));
+
+        let snapshot = model.snapshot();
+        let occupied_rows: Vec<_> = snapshot.cells.iter().map(|cell| cell.row).collect();
+        assert_eq!(occupied_rows.iter().min().copied(), Some(5));
+        assert_eq!(occupied_rows.iter().max().copied(), Some(13));
+        assert!(snapshot.cells.iter().any(|cell| cell.text == "█"));
+        assert!(snapshot
+            .cells
+            .iter()
+            .all(|cell| cell.style.background_rgba == [0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn default_terminal_background_is_pure_black() {
+        let mut model = model();
+        model.feed("X");
+        assert_eq!(
+            model.snapshot().cells[0].style.background_rgba,
+            [0, 0, 0, 255]
+        );
     }
 
     #[test]

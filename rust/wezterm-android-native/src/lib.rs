@@ -18,7 +18,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use wezterm_android_core::{
-    android_key_bytes, TerminalModel, TerminalSnapshot, UPSTREAM_WEZTERM_REVISION,
+    android_key_bytes, idle_cat_ansi, TerminalModel, TerminalSnapshot, UPSTREAM_WEZTERM_REVISION,
 };
 use wezterm_android_font::{
     AlphaAtlas, FontSet, UPSTREAM_WEZTERM_REVISION as FONT_UPSTREAM_WEZTERM_REVISION,
@@ -149,7 +149,7 @@ impl Default for CellRenderData {
             glyph_origin: [0.0; 2],
             glyph_size: [0.0; 2],
             foreground: [0.84, 0.88, 0.94, 1.0],
-            background: [0.043, 0.055, 0.078, 1.0],
+            background: [0.0, 0.0, 0.0, 1.0],
             flags: [0; 4],
         }
     }
@@ -183,25 +183,56 @@ fn terminal_dimensions(width: u32, height: u32, density_dpi: u32) -> (usize, usi
     (columns, rows)
 }
 
+fn idle_terminal(
+    columns: usize,
+    rows: usize,
+    pixel_width: usize,
+    pixel_height: usize,
+    density_dpi: u32,
+) -> (TerminalModel, TerminalSnapshot) {
+    let mut model = TerminalModel::new(columns, rows, pixel_width, pixel_height, density_dpi);
+    model.feed(idle_cat_ansi(columns, rows));
+    let mut snapshot = model.snapshot();
+    // The disconnected artwork has no input cursor. One cell beyond the grid
+    // uses the renderer's existing out-of-viewport cursor suppression path.
+    snapshot.cursor_column = snapshot.columns;
+    snapshot.cursor_row = snapshot.rows;
+    (model, snapshot)
+}
+
+fn remote_session_active() -> bool {
+    let ssh_active = ssh_session_slot()
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or_else(|_| {
+            log::error!("unable to inspect poisoned SSH session lock");
+            false
+        });
+    if ssh_active {
+        return true;
+    }
+    mux_session_slot()
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or_else(|_| {
+            log::error!("unable to inspect poisoned SSHMUX session lock");
+            false
+        })
+}
+
 fn terminal_snapshot_for_surface(width: u32, height: u32, density_dpi: u32) -> TerminalSnapshot {
     let (columns, rows) = terminal_dimensions(width, height, density_dpi);
+    if !remote_session_active() {
+        let (model, snapshot) =
+            idle_terminal(columns, rows, width as usize, height as usize, density_dpi);
+        TERMINAL.with(|slot| slot.borrow_mut().replace(model));
+        return snapshot;
+    }
     let viewport_offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
     TERMINAL.with(|slot| {
         let mut slot = slot.borrow_mut();
         let model = slot.get_or_insert_with(|| {
-            let mut model =
-                TerminalModel::new(columns, rows, width as usize, height as usize, density_dpi);
-            model.feed(concat!(
-                "\x1b[2J\x1b[H\r\n\r\n",
-                "\x1b[1mWezTerm terminal core is live on Android\x1b[0m\r\n",
-                "P1-B: HarfBuzz + FreeType glyph atlas is live\r\n",
-                "ANSI parser: \x1b[31mred \x1b[32mgreen \x1b[34mblue\x1b[0m\r\n",
-                "Styles: \x1b[4munderline\x1b[0m  \x1b[9mstrike\x1b[0m  \x1b[38;2;255;170;40mtruecolor\x1b[0m\r\n",
-                "Wide cells: A中B  emoji: 🙂  combining: e\u{301}\r\n",
-                "Surface: Android -> ANativeWindow -> wgpu Vulkan\r\n",
-                "Pinned WezTerm font substrate, no X11/fontconfig\r\n",
-            ));
-            model
+            TerminalModel::new(columns, rows, width as usize, height as usize, density_dpi)
         });
         model.resize(columns, rows, width as usize, height as usize, density_dpi);
         model.snapshot_with_scrollback_offset(viewport_offset)
@@ -820,9 +851,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.043,
-                            g: 0.055,
-                            b: 0.078,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -974,6 +1005,37 @@ fn render_terminal_snapshot(terminal: &TerminalSnapshot) -> Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     })
+}
+
+fn replace_with_idle_terminal() -> Result<()> {
+    let renderer_geometry = RENDERER.with(|slot| {
+        slot.borrow().as_ref().map(|renderer| {
+            (
+                renderer.surface_config.width,
+                renderer.surface_config.height,
+                renderer.density_dpi,
+            )
+        })
+    });
+    let (columns, rows, pixel_width, pixel_height, density_dpi) =
+        if let Some((width, height, density_dpi)) = renderer_geometry {
+            let (columns, rows) = terminal_dimensions(width, height, density_dpi);
+            (columns, rows, width as usize, height as usize, density_dpi)
+        } else {
+            let dimensions = TERMINAL.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .map(TerminalModel::snapshot)
+                    .map(|snapshot| (snapshot.columns, snapshot.rows))
+            });
+            let (columns, rows) = dimensions.unwrap_or((80, 24));
+            (columns, rows, 0, 0, 160)
+        };
+
+    let (model, snapshot) = idle_terminal(columns, rows, pixel_width, pixel_height, density_dpi);
+    TERMINAL.with(|slot| slot.borrow_mut().replace(model));
+    reset_view_interaction();
+    render_terminal_snapshot(&snapshot)
 }
 
 fn feed_terminal_and_render(bytes: &[u8]) -> Result<()> {
@@ -1686,7 +1748,7 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSshO
                 .ok_or_else(|| anyhow!("there is no active SSH session"))?;
             session.open_pty(size)?;
         }
-        feed_terminal_and_render(b"\x1b[2J\x1b[H")?;
+        feed_terminal_and_render(b"\x1b[?25h\x1b[2J\x1b[H")?;
         log::info!("requested remote PTY size={}x{}", size.cols, size.rows);
         Ok(())
     })
@@ -1751,7 +1813,7 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSshD
             .lock()
             .map_err(|_| anyhow!("SSH session lock is poisoned"))?
             .take();
-        reset_view_interaction();
+        replace_with_idle_terminal()?;
         log::info!("dropped Android SSH session independently of the Surface");
         Ok(())
     })
@@ -2149,13 +2211,15 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxD
             .take();
         MUX_READY.store(false, Ordering::SeqCst);
         LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
-        if let Some(session) = session {
-            let detach_result = session.detach();
+        let detach_result = if let Some(session) = session {
+            let result = session.detach();
             drop(session);
-            detach_result?;
-        }
-        reset_view_interaction();
-        LAST_VIEW_SNAPSHOT.with(|last| last.borrow_mut().take());
+            result
+        } else {
+            Ok(())
+        };
+        replace_with_idle_terminal()?;
+        detach_result?;
         log::info!("safely detached Android SSHMUX client; remote panes were not killed");
         Ok(())
     })

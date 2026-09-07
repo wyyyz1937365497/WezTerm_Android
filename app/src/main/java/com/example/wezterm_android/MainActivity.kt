@@ -1,6 +1,5 @@
 package com.example.wezterm_android
 
-import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.ApplicationInfo
@@ -17,18 +16,26 @@ import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import kotlin.math.max
+
+private data class DialogTextField(
+    val container: TextInputLayout,
+    val input: TextInputEditText,
+)
 
 class MainActivity : ComponentActivity() {
     private lateinit var statusText: TextView
@@ -144,7 +151,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.rgb(11, 14, 20))
+            setBackgroundColor(Color.BLACK)
         }
         val contentColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -469,13 +476,13 @@ class MainActivity : ComponentActivity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
-            addView(hostInput)
-            addView(userInput)
-            addView(portInput)
-            if (useMux) addView(remoteWeztermInput)
+            addView(hostInput.container)
+            addView(userInput.container)
+            addView(portInput.container)
+            if (useMux) addView(remoteWeztermInput.container)
         }
 
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(if (useMux) R.string.mux_connection_title else R.string.ssh_connection_title)
             .setMessage(
                 if (useMux) {
@@ -498,14 +505,15 @@ class MainActivity : ComponentActivity() {
             .create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val port = portInput.text.toString().toIntOrNull()
+                val port = portInput.input.text.toString().toIntOrNull()
                 if (port == null || port !in 1..65535) {
-                    portInput.error = getString(R.string.ssh_invalid_port)
+                    portInput.container.error = getString(R.string.ssh_invalid_port)
                     return@setOnClickListener
                 }
-                val host = hostInput.text.toString().trim()
-                val user = userInput.text.toString().trim()
-                val remoteWeztermPath = remoteWeztermInput.text.toString().trim()
+                portInput.container.error = null
+                val host = hostInput.input.text.toString().trim()
+                val user = userInput.input.text.toString().trim()
+                val remoteWeztermPath = remoteWeztermInput.input.text.toString().trim()
                 if (useMux) disableMuxAutoReconnect()
                 val error = if (useMux) {
                     NativeBridge.nativeMuxStart(
@@ -556,17 +564,34 @@ class MainActivity : ComponentActivity() {
         dialog.show()
     }
 
-    private fun connectionInput(hint: String, value: String, inputType: Int): EditText =
-        EditText(this).apply {
-            this.hint = hint
+    private fun connectionInput(hint: String, value: String, inputType: Int): DialogTextField {
+        val input = TextInputEditText(this).apply {
             setText(value)
             this.inputType = inputType
             isSingleLine = true
             selectAll()
         }
+        val container = TextInputLayout(
+            this,
+            null,
+            com.google.android.material.R.attr.textInputOutlinedStyle,
+        ).apply {
+            this.hint = hint
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            setPadding(0, dp(4), 0, dp(4))
+            addView(
+                input,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        return DialogTextField(container, input)
+    }
 
     private fun showDisconnectConfirmation() {
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle(R.string.ssh_disconnect_title)
             .setMessage(R.string.ssh_disconnect_message)
             .setNegativeButton(android.R.string.cancel, null)
@@ -731,7 +756,7 @@ class MainActivity : ComponentActivity() {
 
     private fun showMuxCloseConfirmation() {
         if (muxTabCount == 0 || muxCommandInFlight) return
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle(R.string.mux_close_tab_title)
             .setMessage(R.string.mux_close_tab_message)
             .setNegativeButton(android.R.string.cancel, null)
@@ -746,7 +771,7 @@ class MainActivity : ComponentActivity() {
 
     private fun showMuxDetachConfirmation() {
         if (!NativeBridge.nativeMuxHasSession() || muxCommandInFlight) return
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle(R.string.mux_detach_title)
             .setMessage(R.string.mux_detach_message)
             .setNegativeButton(android.R.string.cancel, null)
@@ -914,7 +939,7 @@ class MainActivity : ComponentActivity() {
     private fun showFatalMuxError(message: String) {
         statusText.text = getString(R.string.mux_failed, message)
         if (activeChallengeDialog != null) return
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.mux_error_title)
             .setMessage(message)
             .setPositiveButton(android.R.string.ok) { _, _ -> detachMuxSession() }
@@ -1013,7 +1038,7 @@ class MainActivity : ComponentActivity() {
     private fun showHostVerification(message: String) {
         if (activeChallengeDialog != null) return
         pollPausedForChallenge = true
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.ssh_host_verification_title)
             .setMessage(message)
             .setCancelable(false)
@@ -1048,7 +1073,7 @@ class MainActivity : ComponentActivity() {
     private fun showAuthentication(event: JSONObject) {
         if (activeChallengeDialog != null) return
         val prompts = event.getJSONArray("prompts")
-        val inputs = mutableListOf<EditText>()
+        val inputs = mutableListOf<DialogTextField>()
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
@@ -1061,17 +1086,17 @@ class MainActivity : ComponentActivity() {
         for (index in 0 until prompts.length()) {
             val prompt = prompts.getJSONObject(index)
             val echo = prompt.optBoolean("echo", false)
-            val input = EditText(this).apply {
-                hint = prompt.optString("text", getString(R.string.ssh_authentication_answer))
-                isSingleLine = true
+            val input = connectionInput(
+                hint = prompt.optString("text", getString(R.string.ssh_authentication_answer)),
+                value = "",
                 inputType = if (echo) {
                     InputType.TYPE_CLASS_TEXT
                 } else {
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                }
-            }
+                },
+            )
             inputs += input
-            content.addView(input)
+            content.addView(input.container)
         }
 
         pollPausedForChallenge = true
@@ -1081,7 +1106,7 @@ class MainActivity : ComponentActivity() {
         } else {
             getString(R.string.ssh_authentication_title_user, username)
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(title)
             .setView(content)
             .setCancelable(false)
@@ -1091,9 +1116,9 @@ class MainActivity : ComponentActivity() {
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val answers = JSONArray()
-                inputs.forEach { input -> answers.put(input.text.toString()) }
+                inputs.forEach { field -> answers.put(field.input.text.toString()) }
                 val error = NativeBridge.nativeSshAnswerAuthentication(answers.toString())
-                inputs.forEach { input -> input.text.clear() }
+                inputs.forEach { field -> field.input.text?.clear() }
                 if (error != null) {
                     statusText.text = getString(R.string.ssh_authentication_failed, error)
                     return@setOnClickListener
@@ -1108,14 +1133,14 @@ class MainActivity : ComponentActivity() {
         }
         activeChallengeDialog = dialog
         dialog.show()
-        inputs.firstOrNull()?.requestFocus()
+        inputs.firstOrNull()?.input?.requestFocus()
     }
 
     private fun showFatalSshError(message: String) {
         if (activeChallengeDialog != null) return
         pollPausedForChallenge = true
         statusText.text = getString(R.string.ssh_failed, message)
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.ssh_error_title)
             .setMessage(message)
             .setPositiveButton(android.R.string.ok) { _, _ -> disconnectSession() }
