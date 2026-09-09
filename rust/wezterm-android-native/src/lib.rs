@@ -3,7 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{
-    jboolean, jfloat, jint, jobject, jstring, JNIEnv as RawJniEnv, JNI_FALSE, JNI_TRUE,
+    jboolean, jfloat, jint, jlong, jobject, jstring, JNIEnv as RawJniEnv, JNI_FALSE, JNI_TRUE,
 };
 use jni::JNIEnv;
 use raw_window_handle::{
@@ -2077,6 +2077,7 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxS
     app_files_dir: JString<'_>,
     identity_file: JString<'_>,
     remote_wezterm_path: JString<'_>,
+    preferred_remote_tab_id: jlong,
 ) -> jstring {
     init_logging();
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
@@ -2094,6 +2095,10 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxS
         let identity_file = read_java_string(&mut env, &identity_file)?;
         let remote_wezterm_path = read_java_string(&mut env, &remote_wezterm_path)?;
         let port = u16::try_from(port).context("SSH port is outside 1..=65535")?;
+        let preferred_remote_tab_id = (preferred_remote_tab_id >= 0)
+            .then(|| usize::try_from(preferred_remote_tab_id))
+            .transpose()
+            .context("preferred remote tab id is outside the platform range")?;
 
         if ssh_session_slot()
             .lock()
@@ -2129,7 +2134,8 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxS
             identity,
             &remote_wezterm_path,
         )?;
-        let session = AndroidMuxSession::start(endpoint, current_mux_size()?)?;
+        let session =
+            AndroidMuxSession::start(endpoint, current_mux_size()?, preferred_remote_tab_id)?;
 
         reset_view_interaction();
         MUX_READY.store(false, Ordering::SeqCst);
@@ -2309,6 +2315,23 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxA
         }
         with_mux_session("activate remote tab", |session| {
             session.activate_relative(delta as isize)
+        })?;
+        reset_view_interaction();
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxActivateTab(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    remote_tab_id: jlong,
+) -> jstring {
+    ffi_error_string(&mut env, "nativeMuxActivateTab", || {
+        let remote_tab_id =
+            usize::try_from(remote_tab_id).context("remote tab id must be non-negative")?;
+        with_mux_session("restore remote tab", |session| {
+            session.activate(remote_tab_id)
         })?;
         reset_view_interaction();
         Ok(())

@@ -60,6 +60,8 @@ class MainActivity : AppCompatActivity() {
     private var remoteWasReady = false
     private var muxTabCount = 0
     private var muxCommandInFlight = false
+    private var activeMuxRemoteTabId: Long? = null
+    private var pendingMuxRestoreRemoteTabId: Long? = null
     private var rendererReady = false
     private var activityStarted = false
     private var selectionActionMode: ActionMode? = null
@@ -208,6 +210,8 @@ class MainActivity : AppCompatActivity() {
             onDismissRequested = { hideTerminalKeyboard() }
             onTerminalFocusRequested = { terminalSurface.requestFocus() }
         }
+        terminalKeyboard.restoreComposerDrafts(loadComposerDrafts())
+        terminalKeyboard.onComposerDraftsChanged = { drafts -> persistComposerDrafts(drafts) }
         terminalSurface.onTerminalTapped = {
             if (remoteTerminalReady()) showTerminalKeyboard()
         }
@@ -437,6 +441,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (NativeBridge.nativeMuxReady()) {
+            pendingMuxRestoreRemoteTabId = preferredMuxTabId().takeIf { it >= 0L }
+            restorePreferredMuxTab()
             NativeBridge.nativeMuxCurrentTabs()?.let(::restoreMuxTabs)
         }
         updateTerminalInputState()
@@ -445,7 +451,13 @@ class MainActivity : AppCompatActivity() {
         terminalSurface.post { maybeAutoReconnectMux() }
     }
 
+    override fun onPause() {
+        persistComposerDraftsNow(terminalKeyboard.composerDraftSnapshot())
+        super.onPause()
+    }
+
     override fun onStop() {
+        persistComposerDrafts(terminalKeyboard.composerDraftSnapshot())
         activityStarted = false
         mainHandler.removeCallbacks(retryMuxConnection)
         muxReconnectScheduled = false
@@ -540,6 +552,7 @@ class MainActivity : AppCompatActivity() {
                         filesDir.absolutePath,
                         debugIdentity?.absolutePath.orEmpty(),
                         remoteWeztermPath,
+                        preferredMuxTabId(),
                     )
                 } else {
                     NativeBridge.nativeSshStart(
@@ -621,6 +634,7 @@ class MainActivity : AppCompatActivity() {
         activeChallengeDialog = null
         pollPausedForChallenge = false
         val error = NativeBridge.nativeSshDisconnect()
+        terminalKeyboard.clearComposerDrafts()
         statusText.text = if (error == null) {
             getString(R.string.renderer_ready, rendererDetail)
         } else {
@@ -689,6 +703,7 @@ class MainActivity : AppCompatActivity() {
         when (event.optString("type")) {
             "connecting" -> statusText.text = getString(R.string.mux_negotiating)
             "attached" -> {
+                restorePreferredMuxTab()
                 muxTabCount = event.optInt("tab_count", 0)
                 getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
                     .edit()
@@ -737,14 +752,42 @@ class MainActivity : AppCompatActivity() {
         muxTabCount = tabs.length()
         var activeIndex = -1
         var activeTitle = ""
+        var activeRemoteTabId: Long? = null
+        var preferredIndex = -1
+        var preferredTitle = ""
+        val pendingRestore = pendingMuxRestoreRemoteTabId
         for (index in 0 until tabs.length()) {
             val tab = tabs.optJSONObject(index) ?: continue
+            val remoteTabId = tab.optLong("remote_tab_id", -1L)
+            val title = tab.optString("title").replace(Regex("[\\r\\n\\t]"), " ")
+            if (remoteTabId == pendingRestore) {
+                preferredIndex = index
+                preferredTitle = title
+            }
             if (tab.optBoolean("active", false)) {
                 activeIndex = index
-                activeTitle = tab.optString("title").replace(Regex("[\\r\\n\\t]"), " ")
-                break
+                activeTitle = title
+                activeRemoteTabId = remoteTabId.takeIf { it >= 0L }
             }
         }
+
+        if (pendingRestore != null) {
+            if (activeRemoteTabId == pendingRestore) {
+                pendingMuxRestoreRemoteTabId = null
+            } else if (preferredIndex >= 0 &&
+                NativeBridge.nativeMuxActivateTab(pendingRestore) == null
+            ) {
+                activeIndex = preferredIndex
+                activeTitle = preferredTitle
+                activeRemoteTabId = pendingRestore
+            } else {
+                pendingMuxRestoreRemoteTabId = null
+            }
+        }
+
+        this.activeMuxRemoteTabId = activeRemoteTabId
+        terminalKeyboard.switchComposerContext(activeRemoteTabId?.let(::muxComposerContext))
+        activeRemoteTabId?.let(::persistPreferredMuxTabId)
 
         if (muxTabCount == 0) {
             muxTabText.text = getString(R.string.mux_no_tabs)
@@ -799,6 +842,7 @@ class MainActivity : AppCompatActivity() {
     private fun runMuxCommand(progress: String, command: () -> String?) {
         if (!NativeBridge.nativeMuxReady() || muxCommandInFlight) return
         muxCommandInFlight = true
+        pendingMuxRestoreRemoteTabId = null
         statusText.text = progress
         updateConnectionControls()
         Thread(
@@ -901,6 +945,7 @@ class MainActivity : AppCompatActivity() {
         muxReconnectScheduled = false
         statusText.text = getString(R.string.mux_reconnecting, user, host, port)
         updateConnectionControls()
+        pendingMuxRestoreRemoteTabId = preferredMuxTabId().takeIf { it >= 0L }
         val error = try {
             NativeBridge.nativeMuxStart(
                 host,
@@ -909,6 +954,7 @@ class MainActivity : AppCompatActivity() {
                 filesDir.absolutePath,
                 debugIdentityFile()?.absolutePath.orEmpty(),
                 remoteWeztermPath,
+                preferredMuxTabId(),
             )
         } catch (failure: Throwable) {
             failure.message ?: failure.javaClass.simpleName
@@ -943,6 +989,66 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
             .getBoolean(PREFERENCE_MUX_AUTO_REATTACH, false)
 
+    private fun preferredMuxTabId(): Long =
+        getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .getLong(PREFERENCE_MUX_REMOTE_TAB_ID, -1L)
+
+    private fun restorePreferredMuxTab() {
+        val remoteTabId = preferredMuxTabId()
+        if (remoteTabId < 0L || !NativeBridge.nativeMuxReady()) return
+        pendingMuxRestoreRemoteTabId = remoteTabId
+        NativeBridge.nativeMuxActivateTab(remoteTabId)
+    }
+
+    private fun muxComposerContext(remoteTabId: Long): String =
+        "$MUX_COMPOSER_CONTEXT_PREFIX$remoteTabId"
+
+    private fun persistPreferredMuxTabId(remoteTabId: Long) {
+        getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .edit()
+            .putLong(PREFERENCE_MUX_REMOTE_TAB_ID, remoteTabId)
+            .apply()
+    }
+
+    private fun loadComposerDrafts(): Map<String, String> {
+        val encoded = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .getString(PREFERENCE_COMPOSER_DRAFTS, null)
+            ?: return emptyMap()
+        return try {
+            val objectValue = JSONObject(encoded)
+            buildMap {
+                objectValue.keys().forEach { context ->
+                    put(context, objectValue.optString(context))
+                }
+            }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun persistComposerDrafts(drafts: Map<String, String>) {
+        updatePersistedComposerDrafts(drafts, commitNow = false)
+    }
+
+    private fun persistComposerDraftsNow(drafts: Map<String, String>) {
+        updatePersistedComposerDrafts(drafts, commitNow = true)
+    }
+
+    private fun updatePersistedComposerDrafts(
+        drafts: Map<String, String>,
+        commitNow: Boolean,
+    ) {
+        val editor = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE).edit()
+        if (drafts.isEmpty()) {
+            editor.remove(PREFERENCE_COMPOSER_DRAFTS)
+        } else {
+            val objectValue = JSONObject()
+            drafts.forEach { (context, text) -> objectValue.put(context, text) }
+            editor.putString(PREFERENCE_COMPOSER_DRAFTS, objectValue.toString())
+        }
+        if (commitNow) editor.commit() else editor.apply()
+    }
+
     private fun disableMuxAutoReconnect() {
         mainHandler.removeCallbacks(retryMuxConnection)
         muxReconnectScheduled = false
@@ -968,6 +1074,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetMuxUi() {
+        activeMuxRemoteTabId = null
+        terminalKeyboard.switchComposerContext(null)
         muxTabCount = 0
         muxTabText.text = getString(R.string.mux_no_tabs)
         muxToolbar.visibility = View.GONE
@@ -1212,6 +1320,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTerminalInputState(showWhenReady: Boolean = false) {
         val ready = remoteTerminalReady()
+        val composerContext = when {
+            NativeBridge.nativeSshPtyReady() -> SSH_COMPOSER_CONTEXT
+            NativeBridge.nativeMuxReady() -> muxInputRemoteTabId()?.let(::muxComposerContext)
+            else -> null
+        }
+        terminalKeyboard.switchComposerContext(composerContext)
         terminalKeyboard.setTerminalReady(ready)
         keyboardButton.isEnabled = ready
         keyboardButton.alpha = if (ready) 1f else 0.45f
@@ -1225,7 +1339,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun remoteTerminalReady(): Boolean =
         NativeBridge.nativeSshPtyReady() ||
-            (NativeBridge.nativeMuxReady() && muxTabCount > 0)
+            (NativeBridge.nativeMuxReady() && muxTabCount > 0 && muxInputRemoteTabId() != null)
+
+    private fun muxInputRemoteTabId(): Long? =
+        activeMuxRemoteTabId ?: pendingMuxRestoreRemoteTabId
 
     private fun showTerminalKeyboard() {
         terminalKeyboard.showPanel()
@@ -1270,6 +1387,10 @@ class MainActivity : AppCompatActivity() {
         private const val PREFERENCE_PORT = "port"
         private const val PREFERENCE_REMOTE_WEZTERM = "remote_wezterm_path"
         private const val PREFERENCE_MUX_AUTO_REATTACH = "mux_auto_reattach"
+        private const val PREFERENCE_MUX_REMOTE_TAB_ID = "mux_remote_tab_id"
+        private const val SSH_COMPOSER_CONTEXT = "ssh"
+        private const val PREFERENCE_COMPOSER_DRAFTS = "composer_drafts"
+        private const val MUX_COMPOSER_CONTEXT_PREFIX = "mux:"
         private const val ACTION_COPY = 1_001
         private const val ACTION_PASTE = 1_002
         private const val ACTION_SELECT_ALL = 1_003

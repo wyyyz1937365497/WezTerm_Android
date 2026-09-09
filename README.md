@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.1.0`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.1.1`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -24,12 +24,12 @@ Android 发行版。
 
 - Android `SurfaceView` → JNI `ANativeWindow` → wgpu/Vulkan 原生渲染；
 - `wezterm-term` ANSI/TrueColor/cell/scrollback 终端模型；
-- MesloLGS Nerd Font Mono + Android Noto Sans CJK fallback；
+- MesloLGS Nerd Font Mono + 内置 Noto Sans Math + Android Noto Sans CJK fallback；
 - 普通 SSH：host-key、认证、`xterm-256color` PTY、输入与 resize；
-- SSHMUX：持久远端标签、新建/切换/关闭、安全 Detach 和自动重附着；
+- SSHMUX：持久远端标签、新建/切换/关闭、安全 Detach、自动重附着和活动标签恢复；
 - 动态标签标题，跟随远端 pane/OSC title 更新；
 - 固定底部英文/符号/特殊键键盘，不覆盖终端 Surface；
-- 独立系统 IME 输入框，支持完成中文 composing 后整串发送；
+- 独立系统 IME 输入框，支持自动换行、按 MUX 标签保存草稿并整串发送；
 - 单指发送远端滚轮给 TUI，双指浏览本地历史；
 - 长按选择、Android 浮动操作栏和系统剪贴板；
 - 前后台 Surface 重建、失效连接识别和指数退避恢复；
@@ -39,10 +39,17 @@ Android 发行版。
 完整目标和模块边界见 [架构文档](docs/ARCHITECTURE.md)；开发历程、故障根因、验证
 方法和已知限制见 [维护文档](docs/MAINTENANCE.md)。`docs/` 只维护这两份活文档。
 
+## v0.1.1 更新
+
+- 补充内置 Noto Sans Math fallback，修复数学字母数字符号显示方框；
+- 中文 IME 输入框支持自动换行、按 MUX 标签隔离草稿以及前后台持久恢复；
+- 自动重附着和 Activity 恢复时重新聚焦离开前的远端 MUX 标签；
+- Launcher 改用带黑色安全边距的 WezTerm 上游图标，避免 adaptive icon 裁切。
+
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.1.0-arm64-debug.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.1.1-arm64-debug.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - 使用 Android debug 签名；
@@ -128,7 +135,7 @@ app/
 rust/
   wezterm-android-native   JNI、ANativeWindow、wgpu 与生命周期协调
   wezterm-android-core     wezterm-term 和 TerminalSnapshot
-  wezterm-android-font     HarfBuzz、FreeType、Meslo/CJK 与 glyph atlas
+  wezterm-android-font     HarfBuzz、FreeType、Meslo/数学/CJK 与 glyph atlas
   wezterm-android-ssh      普通 SSH 客户端
   wezterm-android-mux      SSHMUX client、标签与恢复
 docs/

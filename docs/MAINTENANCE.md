@@ -1,8 +1,8 @@
 # WezTerm Android 开发与维护记录
 
-最后更新：2026-09-07
+最后更新：2026-09-09
 
-当前版本：`v0.1.0`
+当前版本：`v0.1.1`
 
 主分支：`main`
 
@@ -29,7 +29,7 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | NDK | `28.2.13676358` |
 | 首发 ABI | `arm64-v8a` |
 | Rust target | `aarch64-linux-android` |
-| 默认终端字体 | MesloLGS Nerd Font Mono Regular |
+| 默认终端字体 | MesloLGS Nerd Font Mono Regular + Noto Sans Math |
 | CJK fallback | Android 系统 Noto Sans CJK SC |
 | GPU 路径 | wgpu / Vulkan / `ANativeWindow` |
 | 远程模式 | 普通 SSH、SSHMUX |
@@ -37,9 +37,9 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | 发布性质 | ARM64、debug 签名、GitHub Release |
 
 当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、普通
-SSH、SSHMUX、动态标签标题、安全分离、标签控制、应用内键盘、独立中文输入框、
-TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3 设置、中英文界面和失效连接
-自动重附着。
+SSH、SSHMUX、动态标签标题、安全分离、标签控制与活动标签恢复、应用内键盘、自动换行
+且按标签隔离草稿的中文输入框、TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3
+设置、中英文界面和失效连接自动重附着。
 
 ## 3. 开发历程
 
@@ -143,6 +143,20 @@ TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3 设置�
 
 动态标题已在真机连续截图中验证：远端 pane/OSC 标题改变后，顶部标签无需手动切换便
 随快照更新。
+
+### 3.8 数学字符、标签草稿与前后台恢复
+
+发布版本：`v0.1.1`
+
+- 内置 Noto Sans Math，作为 Meslo Nerd Font 与系统 Noto CJK 之间的确定性 fallback，
+  补齐 Mathematical Alphanumeric Symbols，避免依赖 OEM 不完整的系统字体；
+- 中文 IME 编辑框改为自动换行并最多增长到六行；草稿以稳定远端 tab ID 隔离，每次
+  文本变化写入应用私有偏好，并在 `onPause` 同步落盘；重连元数据未就绪前绑定待恢复
+  tab ID，且不依据瞬时标签快照删除草稿；
+- MUX 快照暴露远端 tab ID，Activity 持久化最后活动 ID，前台恢复和自动重附着时由
+  Rust runtime 在首个可见快照前重新聚焦对应标签；
+- Launcher 使用 WezTerm 上游 `assets/icon/terminal.png`，外加黑色安全边距，避免
+  adaptive icon mask 裁掉原图边缘。
 
 `v0.1.0` 发布截图：
 
@@ -325,7 +339,7 @@ adb logcat -s WezTermAndroid
 
 ## 6. 发布流程
 
-首个版本采用普通 GitHub Release，资产名称明确包含 ABI 和 debug 签名性质。维护步骤：
+当前版本采用普通 GitHub Release，资产名称明确包含 ABI 和 debug 签名性质。维护步骤：
 
 1. 更新 `versionCode` / `versionName`、README、架构与维护文档；
 2. 运行第 5 节的 Gradle、Rust 和真机检查；

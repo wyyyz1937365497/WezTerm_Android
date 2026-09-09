@@ -11,6 +11,7 @@ pub const UPSTREAM_WEZTERM_REVISION: &str = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdf
 pub const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
 pub const MESLO_LGS_NERD_FONT_MONO_REGULAR: &[u8] =
     include_bytes!("../assets/MesloLGSNerdFontMono-Regular.ttf");
+pub const NOTO_SANS_MATH_REGULAR: &[u8] = include_bytes!("../assets/NotoSansMath-Regular.ttf");
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineMetrics {
@@ -283,6 +284,15 @@ impl FontFace {
         Self::from_static_memory(
             "bundled JetBrains Mono Regular",
             JETBRAINS_MONO_REGULAR,
+            0,
+            pixel_height,
+        )
+    }
+
+    pub fn bundled_noto_sans_math(pixel_height: u32) -> Result<Self> {
+        Self::from_static_memory(
+            "bundled Noto Sans Math Regular",
+            NOTO_SANS_MATH_REGULAR,
             0,
             pixel_height,
         )
@@ -561,7 +571,10 @@ impl std::fmt::Debug for FontSet {
 impl FontSet {
     pub fn bundled(pixel_height: u32) -> Result<Self> {
         Ok(Self {
-            faces: vec![FontFace::bundled_meslo_lgs_nerd_font_mono(pixel_height)?],
+            faces: vec![
+                FontFace::bundled_meslo_lgs_nerd_font_mono(pixel_height)?,
+                FontFace::bundled_noto_sans_math(pixel_height)?,
+            ],
         })
     }
 
@@ -736,13 +749,18 @@ mod tests {
     }
 
     #[test]
-    fn bundled_font_contains_nerd_and_powerline_private_use_glyphs() {
+    fn bundled_fonts_cover_nerd_powerline_and_mathematical_alphanumerics() {
         let fonts = FontSet::bundled(36).unwrap();
 
         // U+E0B0 is Powerline's right-facing separator. U+F120 is the
         // Font Awesome terminal icon. Both would be absent from plain Meslo.
         assert_ne!(fonts.faces()[0].glyph_index('\u{e0b0}'), 0);
         assert_ne!(fonts.faces()[0].glyph_index('\u{f120}'), 0);
+
+        for character in ['\u{1d41f}', '\u{1d42b}', '\u{1d405}'] {
+            assert_eq!(fonts.select_face(&character.to_string()), 1);
+            assert_ne!(fonts.faces()[1].glyph_index(character), 0);
+        }
     }
 
     #[test]
@@ -778,11 +796,11 @@ mod tests {
 
         let mut fonts = FontSet::bundled(36).unwrap();
         fonts.add_path("Noto Sans CJK SC", path, 2).unwrap();
-        assert_eq!(fonts.select_face("中"), 1);
+        assert_eq!(fonts.select_face("中"), 2);
         let run = fonts.shape("中文").unwrap();
-        assert_eq!(run.font_index, 1);
+        assert_eq!(run.font_index, 2);
         assert!(run.glyphs.iter().all(|glyph| glyph.glyph_id != 0));
-        let glyph = fonts.rasterize(1, run.glyphs[0].glyph_id).unwrap();
+        let glyph = fonts.rasterize(2, run.glyphs[0].glyph_id).unwrap();
         assert!(glyph.alpha.iter().any(|coverage| *coverage != 0));
     }
 

@@ -116,6 +116,7 @@ internal object NativeBridge {
         appFilesDir: String,
         identityFile: String,
         remoteWeztermPath: String,
+        preferredRemoteTabId: Long,
     ): String?
 
     @JvmStatic
@@ -138,6 +139,10 @@ internal object NativeBridge {
 
     @JvmStatic
     external fun nativeMuxActivateRelative(delta: Int): String?
+
+    /** Selects a stable server-side tab id after foregrounding or reconnecting. */
+    @JvmStatic
+    external fun nativeMuxActivateTab(remoteTabId: Long): String?
 
     @JvmStatic
     external fun nativeMuxSpawnTab(): String?

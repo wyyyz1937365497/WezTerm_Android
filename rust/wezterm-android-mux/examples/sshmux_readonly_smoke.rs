@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
             pixel_height: optional_usize("WEZTERM_ANDROID_MUX_PIXEL_HEIGHT", 480),
             dpi: optional_usize("WEZTERM_ANDROID_MUX_DPI", 160) as u32,
         },
+        None,
     )?;
 
     let deadline = Instant::now() + Duration::from_secs(20);

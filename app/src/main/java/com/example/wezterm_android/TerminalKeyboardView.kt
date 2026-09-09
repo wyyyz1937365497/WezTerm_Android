@@ -5,7 +5,9 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -14,10 +16,41 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.GridLayout
+
+internal class TerminalComposerDrafts {
+    private val drafts = mutableMapOf<String, String>()
+    private var activeContext: String? = null
+
+    fun switchContext(context: String?): String {
+        activeContext = context
+        return context?.let { drafts[it] }.orEmpty()
+    }
+
+    fun updateActive(text: String) {
+        activeContext?.let { drafts[it] = text }
+    }
+
+    fun clearActive() {
+        activeContext?.let(drafts::remove)
+    }
+
+    fun snapshot(): Map<String, String> = drafts.toMap()
+
+    fun restore(restored: Map<String, String>) {
+        drafts.clear()
+        drafts.putAll(restored)
+        activeContext = null
+    }
+
+    fun clear() {
+        drafts.clear()
+        activeContext = null
+    }
+}
 
 /**
  * A terminal-specific keyboard that never invokes the Android IME for its
@@ -31,6 +64,7 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
     var onInputSent: ((Int) -> Unit)? = null
     var onDismissRequested: (() -> Unit)? = null
     var onTerminalFocusRequested: (() -> Unit)? = null
+    var onComposerDraftsChanged: ((Map<String, String>) -> Unit)? = null
 
     private val terminalButtons = mutableListOf<Button>()
     private val modifierButtons = mutableMapOf<TerminalModifier, Button>()
@@ -42,6 +76,11 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
 
     private var terminalReady: Boolean? = null
     private val activeModifiers = mutableSetOf<TerminalModifier>()
+    private val composerDrafts = TerminalComposerDrafts()
+
+    private var composerContext: String? = null
+    private var changingComposerText = false
+    private var suspendedComposerContext: String? = null
 
     init {
         orientation = VERTICAL
@@ -79,13 +118,20 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
             setTextColor(Color.WHITE)
             setHintTextColor(TEXT_MUTED)
             textSize = 14f
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            minLines = 1
+            maxLines = COMPOSER_MAX_LINES
+            isSingleLine = false
+            setHorizontallyScrolling(false)
+            gravity = Gravity.TOP or Gravity.START
+            inputType =
+                InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE
             imeOptions =
                 EditorInfo.IME_ACTION_DONE or
                     EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                     EditorInfo.IME_FLAG_NO_FULLSCREEN
-            setPadding(dp(10), 0, dp(10), 0)
+            setPadding(dp(10), dp(9), dp(10), dp(9))
             backgroundTintList = ColorStateList.valueOf(ACCENT_COLOR)
             setOnEditorActionListener { _, actionId, event ->
                 val requested =
@@ -94,18 +140,50 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
                 if (requested) sendComposedText()
                 requested
             }
+            addTextChangedListener(
+                object : TextWatcher {
+                    override fun beforeTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        count: Int,
+                        after: Int,
+                    ) = Unit
+
+                    override fun onTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        before: Int,
+                        count: Int,
+                    ) = Unit
+
+                    override fun afterTextChanged(text: Editable?) {
+                        if (changingComposerText) return
+                        composerDrafts.updateActive(text?.toString().orEmpty())
+                        notifyComposerDraftsChanged()
+                    }
+                },
+            )
         }
         sendButton = headerButton(context.getString(R.string.keyboard_send)).apply {
             setOnClickListener { sendComposedText() }
         }
         composerRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.BOTTOM
+            minimumHeight = dp(48)
             visibility = View.GONE
-            addView(composerInput, LayoutParams(0, dp(44), 1f))
+            addView(
+                composerInput,
+                LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    minimumHeight = dp(44)
+                },
+            )
             addView(sendButton, LayoutParams(dp(72), dp(38)).withMargins(4, 3, 0, 3))
         }
-        addView(composerRow, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+        addView(
+            composerRow,
+            LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
 
         keyboardBody = createKeyboardBody()
         addView(keyboardBody)
@@ -147,6 +225,44 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     fun isPanelVisible(): Boolean = visibility == View.VISIBLE
+
+    fun switchComposerContext(context: String?) {
+        if (composerContext == context) return
+        if (context == null) suspendedComposerContext = composerContext
+        val currentText = composerInput.text.toString()
+        val restored = composerDrafts.switchContext(context)
+        val visibleText =
+            if (context != null && suspendedComposerContext == context &&
+                restored.isEmpty() && currentText.isNotEmpty()
+            ) {
+                composerDrafts.updateActive(currentText)
+                currentText
+            } else {
+                restored
+            }
+        if (context != null) {
+            replaceComposerText(visibleText)
+            suspendedComposerContext = null
+        }
+        composerContext = context
+        notifyComposerDraftsChanged()
+    }
+
+    fun restoreComposerDrafts(drafts: Map<String, String>) {
+        composerDrafts.restore(drafts)
+        composerContext = null
+        suspendedComposerContext = null
+    }
+
+    fun composerDraftSnapshot(): Map<String, String> = composerDrafts.snapshot()
+
+    fun clearComposerDrafts() {
+        composerDrafts.clear()
+        suspendedComposerContext = null
+        composerContext = null
+        replaceComposerText("")
+        notifyComposerDraftsChanged()
+    }
 
     private fun createKeyboardBody(): View {
         val mainKeys = LinearLayout(context).apply {
@@ -314,10 +430,27 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
             return
         }
         val codePointCount = value.codePointCount(0, value.length)
-        composerInput.text.clear()
+        composerDrafts.clearActive()
+        replaceComposerText("")
+        notifyComposerDraftsChanged()
         closeComposer()
         onInputSent?.invoke(codePointCount)
         onTerminalFocusRequested?.invoke()
+    }
+
+    private fun notifyComposerDraftsChanged() {
+        onComposerDraftsChanged?.invoke(composerDraftSnapshot())
+    }
+
+    private fun replaceComposerText(value: String) {
+        if (composerInput.text.toString() == value) return
+        changingComposerText = true
+        try {
+            composerInput.setText(value)
+            composerInput.setSelection(value.length)
+        } finally {
+            changingComposerText = false
+        }
     }
 
     private fun closeComposer() {
@@ -384,6 +517,7 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
 
     private companion object {
         const val KEY_HEIGHT_DP = 42
+        const val COMPOSER_MAX_LINES = 6
         const val SPECIAL_COLUMN_COUNT = 6
         const val SPECIAL_KEY_WIDTH_DP = 54
         const val KEYBOARD_CONTENT_MIN_WIDTH_DP = 1_070

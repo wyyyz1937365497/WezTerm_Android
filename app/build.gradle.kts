@@ -28,8 +28,8 @@ android {
         applicationId = "com.example.wezterm_android"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
 
         ndk {
             abiFilters.add("arm64-v8a")

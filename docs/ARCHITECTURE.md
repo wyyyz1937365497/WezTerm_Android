@@ -1,8 +1,8 @@
 # WezTerm Android 架构与目标
 
-最后更新：2026-09-07
+最后更新：2026-09-09
 
-首个公开版本：`v0.1.0`
+首个公开版本：`v0.1.0`；当前发布版本：`v0.1.1`
 
 WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 
@@ -47,17 +47,17 @@ Termux:X11、proot 或 Linux 桌面环境。
 |---|---|---|
 | Android 原生 Surface + wgpu/Vulkan | 已完成 | Android 15 / Mali-G615 MC6 真机通过 |
 | WezTerm terminal cell 模型 | 已完成 | ANSI、TrueColor、宽字符、组合字符与 scrollback 有测试 |
-| 字体与 glyph atlas | 已完成核心闭环 | Meslo Nerd Font + Noto CJK；复杂 cluster、彩色 emoji 待完善 |
+| 字体与 glyph atlas | 已完成核心闭环 | Meslo Nerd Font + Noto Math + Noto CJK；复杂 cluster、彩色 emoji 待完善 |
 | 普通 SSH | 已完成 | host-key、密码/交互认证、私有密钥、PTY 与 resize |
-| SSHMUX | 已完成核心闭环 | attach、输入、标签控制、安全分离、自动重附着 |
+| SSHMUX | 已完成核心闭环 | attach、输入、标签控制、安全分离、自动重附着和活动标签恢复 |
 | 动态标签标题 | 已完成 | 随远端 pane/OSC 标题快照更新，变化检测后通知 UI |
-| 移动输入 | 已完成核心闭环 | 固定键盘 + 独立系统 IME 编辑框整串发送 |
+| 移动输入 | 已完成核心闭环 | 固定键盘 + 自动换行且按 MUX 标签隔离草稿的系统 IME 编辑框 |
 | 触摸与剪贴板 | 已完成核心闭环 | 单指远端滚轮、双指本地历史、长按选择、复制粘贴 |
 | Material 3 设置 | 已完成 | 动态色、深色模式、语言和开发者信息 |
 | 中英文界面 | 已完成 | English、简体中文、跟随系统 |
 | 后台恢复 | 已完成工程闭环 | 进程存活保持；失效连接或冷启动自动重附着 |
 | 16 KB 页兼容 | 仅静态验证 | ELF/APK 对齐通过，尚无 16 KB 页真机运行证据 |
-| 正式发布签名 | 未完成 | `v0.1.0` GitHub Release 仍使用 debug 签名 |
+| 正式发布签名 | 未完成 | 当前 `v0.1.1` GitHub Release 仍使用 debug 签名 |
 
 “已完成”只表示表中限定的功能和验证环境通过，不等价于完整桌面 WezTerm、所有
 Android 设备或长期网络压力测试已经完成。
@@ -136,7 +136,8 @@ SurfaceView.surfaceCreated
 ```text
 cell grapheme
   → MesloLGS Nerd Font Mono
-  → 无字形时选择 Noto Sans CJK SC
+  → 无字形时选择内置 Noto Sans Math
+  → 仍无字形时选择 Android Noto Sans CJK SC
   → HarfBuzz shape
   → FreeType alpha bitmap
   → 1024 × 1024 atlas
@@ -144,8 +145,9 @@ cell grapheme
 ```
 
 默认字体为随 APK 打包的 MesloLGS Nerd Font Mono Regular，包含常用 Nerd/Powerline
-私有区字形。CJK 当前从 Android 系统 Noto CJK 字体加载。JetBrains Mono 资产仍保留
-用于回归和 fallback seam 测试，但不是默认终端 face。
+私有区字形；内置 Noto Sans Math 补齐数学字母数字符号，CJK 再从 Android 系统
+Noto CJK 字体加载。JetBrains Mono 资产仍保留用于回归和 fallback seam 测试，但不是
+默认终端 face。
 
 ### 5.3 普通 SSH
 
@@ -176,6 +178,10 @@ ID、pane ID、标题和活动状态；`wezterm-android-mux` 将其与上一次�
 内容变化时才发出 `TabsChanged`。因此 OSC/pane 标题能够动态更新，而 100 ms UI poll
 不会重复发送相同列表。
 
+每个标签快照同时暴露稳定的远端 tab ID。Activity 保存最后活动的远端 ID；Surface
+重建或失效连接自动重附着时，Rust runtime 在首个快照前重新聚焦该 ID，而不是依赖
+可能变化的本地列表下标。
+
 安全分离和关闭标签页严格区分：
 
 - **Detach** 只断开 Android 镜像，保留远程标签和进程；
@@ -186,8 +192,9 @@ ID、pane ID、标题和活动状态；`wezterm-android-mux` 将其与上一次�
 - 物理按键经 Android key code、Unicode code point 和 modifier 转为终端键序列；
 - 固定底部应用键盘提供英文、常用符号、Esc、Tab、Ctrl、Alt、编辑键、方向键和
   F1–F12，并占用布局高度而不是覆盖终端；
-- 中文等复杂文本在独立输入框中使用系统 IME 完成 composing，点击发送后作为完整
-  UTF-8 字符串写入终端；
+- 中文等复杂文本在独立输入框中使用系统 IME，输入框按内容自动换行并最多增长到六
+  行；未发送文本按稳定远端 tab ID 隔离，切换标签时保存和恢复对应草稿；
+- 点击发送后把完整 UTF-8 字符串写入终端；
 - 输入会退出历史浏览并回到实时底部，避免用户在旧画面中看不到回显。
 
 ### 5.6 触摸、历史和选择
@@ -234,7 +241,7 @@ transport 警告，不能把一个已成功创建的 GPU Surface 标记为失败
 - 默认禁用系统 SSH agent 和任意用户目录 identity 扫描；
 - debug 免密脚本只向 debug 应用私有目录 provision 独立 Ed25519 私钥；
 - 私钥、SDK 路径和构建机状态不得进入 Git 或 Release；
-- `v0.1.0` APK 为 debug 签名版本，不作为正式密钥分发方案；
+- 当前 `v0.1.1` APK 为 debug 签名版本，不作为正式密钥分发方案；
 - 后续正式版本应使用 Android Keystore、文件选择器和独立 release signing。
 
 ## 8. 平台基线

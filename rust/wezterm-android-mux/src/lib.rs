@@ -128,6 +128,7 @@ impl MuxEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MuxTabInfo {
     pub tab_id: usize,
+    pub remote_tab_id: usize,
     pub pane_id: usize,
     pub title: String,
     pub active: bool,
@@ -176,6 +177,7 @@ enum RuntimeCommand {
     Resize(TerminalSize, Sender<Result<(), String>>),
     Tabs(Sender<Result<Vec<MuxTabInfo>, String>>),
     ActivateRelative(isize, Sender<Result<(), String>>),
+    Activate(usize, Sender<Result<(), String>>),
     SpawnTab(Sender<Result<(), String>>),
     CloseActiveTab(Sender<Result<(), String>>),
     Detach(Sender<Result<(), String>>),
@@ -185,6 +187,7 @@ struct RuntimeState {
     mux: Arc<Mux>,
     domain: Arc<ClientDomain>,
     active_pane_id: Option<PaneId>,
+    preferred_remote_tab_id: Option<usize>,
     last_emitted_tabs: Option<Vec<MuxTabInfo>>,
     size: TerminalSize,
     event_tx: Sender<MuxEvent>,
@@ -203,7 +206,11 @@ pub struct AndroidMuxSession {
 }
 
 impl AndroidMuxSession {
-    pub fn start(endpoint: MuxEndpoint, size: TerminalSize) -> anyhow::Result<Self> {
+    pub fn start(
+        endpoint: MuxEndpoint,
+        size: TerminalSize,
+        preferred_remote_tab_id: Option<usize>,
+    ) -> anyhow::Result<Self> {
         if RUNTIME_ACTIVE
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
@@ -218,7 +225,17 @@ impl AndroidMuxSession {
         let session_event_tx = event_tx.clone();
         let join = std::thread::Builder::new()
             .name("wezterm-android-mux".into())
-            .spawn(move || run_runtime(endpoint, size, thread_tx, runtime_rx, event_tx, stopped_tx))
+            .spawn(move || {
+                run_runtime(
+                    endpoint,
+                    size,
+                    preferred_remote_tab_id,
+                    thread_tx,
+                    runtime_rx,
+                    event_tx,
+                    stopped_tx,
+                )
+            })
             .map_err(|error| {
                 RUNTIME_ACTIVE.store(false, Ordering::SeqCst);
                 error
@@ -311,6 +328,16 @@ impl AndroidMuxSession {
         recv_result(rx, "activate tab")
     }
 
+    pub fn activate(&self, remote_tab_id: usize) -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::channel();
+        self.runtime_tx
+            .send(RuntimeMessage::Command(RuntimeCommand::Activate(
+                remote_tab_id,
+                tx,
+            )))?;
+        recv_result(rx, "activate saved tab")
+    }
+
     pub fn spawn_tab(&self) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::channel();
         self.runtime_tx
@@ -361,6 +388,7 @@ fn recv_result<T>(rx: Receiver<Result<T, String>>, operation: &str) -> anyhow::R
 fn run_runtime(
     endpoint: MuxEndpoint,
     size: TerminalSize,
+    preferred_remote_tab_id: Option<usize>,
     runtime_tx: Sender<RuntimeMessage>,
     runtime_rx: Receiver<RuntimeMessage>,
     event_tx: Sender<MuxEvent>,
@@ -398,6 +426,7 @@ fn run_runtime(
             mux,
             domain,
             active_pane_id: None,
+            preferred_remote_tab_id,
             last_emitted_tabs: None,
             size,
             event_tx: event_tx.clone(),
@@ -494,6 +523,15 @@ impl RuntimeState {
     fn finish_attach(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => {
+                if let Some(remote_tab_id) = self.preferred_remote_tab_id.take() {
+                    if let Some(target) = self
+                        .tab_handles()
+                        .into_iter()
+                        .find(|tab| tab.info.remote_tab_id == remote_tab_id)
+                    {
+                        self.active_pane_id = Some(target.info.pane_id);
+                    }
+                }
                 self.ensure_active_pane();
                 if let Some(pane) = self.active_pane() {
                     let _ = pane.resize(self.size);
@@ -561,6 +599,10 @@ impl RuntimeState {
             }
             RuntimeCommand::ActivateRelative(delta, reply) => {
                 let result = self.activate_relative(delta).map_err(display_error);
+                let _ = reply.send(result);
+            }
+            RuntimeCommand::Activate(remote_tab_id, reply) => {
+                let result = self.activate(remote_tab_id).map_err(display_error);
                 let _ = reply.send(result);
             }
             RuntimeCommand::SpawnTab(reply) => self.spawn_tab(reply),
@@ -693,6 +735,19 @@ impl RuntimeState {
             .unwrap_or(0);
         let next = (current as isize + delta).rem_euclid(tabs.len() as isize) as usize;
         self.active_pane_id = Some(tabs[next].info.pane_id);
+        self.focus_active_pane()?;
+        self.emit_tabs_changed();
+        Ok(())
+    }
+
+    fn activate(&mut self, remote_tab_id: usize) -> anyhow::Result<()> {
+        self.ensure_attached()?;
+        let target = self
+            .tab_handles()
+            .into_iter()
+            .find(|tab| tab.info.remote_tab_id == remote_tab_id)
+            .ok_or_else(|| anyhow!("saved remote tab {remote_tab_id} is no longer available"))?;
+        self.active_pane_id = Some(target.info.pane_id);
         self.focus_active_pane()?;
         self.emit_tabs_changed();
         Ok(())
@@ -864,6 +919,9 @@ impl RuntimeState {
                 let Some(pane) = pane else {
                     continue;
                 };
+                let Some(client_pane) = pane.downcast_ref::<ClientPane>() else {
+                    continue;
+                };
                 let title = match tab.get_title() {
                     title if !title.is_empty() => title,
                     _ => pane.get_title(),
@@ -871,6 +929,7 @@ impl RuntimeState {
                 result.push(TabHandle {
                     info: MuxTabInfo {
                         tab_id: tab.tab_id(),
+                        remote_tab_id: client_pane.remote_tab_id,
                         pane_id: pane.pane_id(),
                         title,
                         active: self.active_pane_id == Some(pane.pane_id()),
@@ -1063,6 +1122,7 @@ mod tests {
     fn tab_snapshot_detects_dynamic_title_changes_without_repeating_unchanged_state() {
         let original = vec![MuxTabInfo {
             tab_id: 1,
+            remote_tab_id: 3,
             pane_id: 2,
             title: "shell".to_string(),
             active: true,
