@@ -62,10 +62,11 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.1-arm64-debug.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.1-arm64.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
-- 使用 Android debug 签名；
+- release 构建变体 + cargo `--release` 原生库，使用 Android debug 密钥签名，并保留
+  `debuggable` 以维持 `run-as` 免密身份导入工作流；
 - 尚未接入 Android Keystore 和正式 release signing；
 - 16 KB 页目前只有静态对齐检查，没有 16 KB 页设备运行证据。
 

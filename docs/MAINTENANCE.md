@@ -34,7 +34,7 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | GPU 路径 | wgpu / Vulkan / `ANativeWindow` |
 | 远程模式 | 普通 SSH、SSHMUX |
 | 真机基线 | OPD2407 / OP615AL1，Android 15 / API 35，Mali-G615 MC6 |
-| 发布性质 | ARM64、debug 签名、GitHub Release |
+| 发布性质 | ARM64、release 构建 + debug 密钥签名（保留 debuggable）、GitHub Release |
 
 当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、普通
 SSH、SSHMUX、动态标签标题、安全分离、标签控制与活动标签恢复、每标签独立滚动位置与
@@ -358,7 +358,7 @@ adb logcat -s WezTermAndroid
 
 ## 6. 发布流程
 
-当前版本采用普通 GitHub Release，资产名称明确包含 ABI 和 debug 签名性质。维护步骤：
+当前版本采用普通 GitHub Release，资产名称明确包含 ABI 和签名性质。维护步骤：
 
 1. 更新 `versionCode` / `versionName`、README、架构与维护文档；
 2. 运行第 5 节的 Gradle、Rust 和真机检查；
