@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.2.1`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.2`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -39,6 +39,14 @@ Android 发行版。
 - 纯黑终端、无连接像素猫、Material 3 深色界面；
 - 跟随系统、English、简体中文以及设置页开发者信息。
 
+## v0.2.2 更新
+
+- 选择浮动菜单新增"保存"：把当前视口顶部经完整 scrollback 到实时光标行的内容
+  一键导出为 `Downloads/wezterm-android-<时间戳>.txt`，导出后选择与菜单保持打开；
+- SSHMUX 走绝对行号 `GetLines` RPC，从未在本地渲染过的历史行也能完整导出；
+  本地 SSH 直接读取终端模型，锚点在 UI 线程捕获、RPC 等待与写盘在后台线程；
+- release APK 改为构建时直接使用 debug 密钥签名，`assembleRelease` 产物可直接安装。
+
 ## v0.2.1 更新
 
 - 修复 SSHMUX 下 Surface 重建后终端画面被本地占位内容覆盖的问题：强制缩放应用
@@ -64,7 +72,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.1-arm64.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.2-arm64.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - release 构建变体 + cargo `--release` 原生库，使用 Android debug 密钥签名，并保留
