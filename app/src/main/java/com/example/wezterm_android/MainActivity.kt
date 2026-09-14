@@ -44,8 +44,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var muxButton: Button
     private lateinit var keyboardButton: Button
     private lateinit var historyBottomButton: Button
-    private lateinit var muxToolbar: LinearLayout
-    private lateinit var muxTabText: TextView
     private lateinit var muxPreviousButton: Button
     private lateinit var muxNextButton: Button
     private lateinit var muxNewButton: Button
@@ -62,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var muxCommandInFlight = false
     private var activeMuxRemoteTabId: Long? = null
     private var pendingMuxRestoreRemoteTabId: Long? = null
+    private var appliedTerminalZoom = Int.MIN_VALUE
     private var rendererReady = false
     private var activityStarted = false
     private var selectionActionMode: ActionMode? = null
@@ -212,6 +211,7 @@ class MainActivity : AppCompatActivity() {
         }
         terminalKeyboard.restoreComposerDrafts(loadComposerDrafts())
         terminalKeyboard.onComposerDraftsChanged = { drafts -> persistComposerDrafts(drafts) }
+        applyTerminalZoomFromPreferences()
         terminalSurface.onTerminalTapped = {
             if (remoteTerminalReady()) showTerminalKeyboard()
         }
@@ -222,8 +222,7 @@ class MainActivity : AppCompatActivity() {
         val statusBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(4), dp(6), dp(4))
-            setBackgroundColor(Color.argb(210, 24, 29, 39))
+            setPadding(dp(8), dp(2), dp(4), dp(2))
         }
         statusText = TextView(this).apply {
             text = getString(R.string.renderer_starting)
@@ -232,10 +231,10 @@ class MainActivity : AppCompatActivity() {
         }
         sshButton = Button(this).apply {
             text = getString(R.string.ssh_connect)
-            textSize = 11f
+            textSize = 10f
             minHeight = 0
             minWidth = 0
-            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
             setOnClickListener {
                 if (NativeBridge.nativeSshHasSession()) {
                     showDisconnectConfirmation()
@@ -247,10 +246,10 @@ class MainActivity : AppCompatActivity() {
         muxButton = Button(this).apply {
             text = getString(R.string.mux_attach)
             contentDescription = getString(R.string.mux_connection_title)
-            textSize = 11f
+            textSize = 10f
             minHeight = 0
             minWidth = 0
-            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
             setOnClickListener {
                 if (NativeBridge.nativeMuxHasSession()) {
                     showMuxDetachConfirmation()
@@ -266,20 +265,20 @@ class MainActivity : AppCompatActivity() {
         keyboardButton = Button(this).apply {
             text = getString(R.string.keyboard_toggle)
             contentDescription = getString(R.string.keyboard_toggle_description)
-            textSize = 11f
+            textSize = 10f
             minHeight = 0
             minWidth = 0
-            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
             isEnabled = false
             setOnClickListener { terminalKeyboard.togglePanel() }
         }
         val settingsButton = Button(this).apply {
             text = getString(R.string.settings_button)
             contentDescription = getString(R.string.settings_button_description)
-            textSize = 14f
+            textSize = 11f
             minHeight = 0
             minWidth = 0
-            setPadding(dp(10), dp(2), dp(10), dp(2))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
             setOnClickListener {
                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
             }
@@ -293,6 +292,22 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(10), dp(2), dp(10), dp(2))
             visibility = View.GONE
             setOnClickListener { terminalSurface.scrollToBottom() }
+        }
+        muxPreviousButton = compactToolbarButton("◀", R.string.mux_previous_tab) {
+            runMuxCommand(getString(R.string.mux_switching_tab)) {
+                NativeBridge.nativeMuxActivateRelative(-1)
+            }
+        }
+        muxNewButton = compactToolbarButton("+", R.string.mux_new_tab) {
+            runMuxCommand(getString(R.string.mux_creating_tab), NativeBridge::nativeMuxSpawnTab)
+        }
+        muxCloseButton = compactToolbarButton("×", R.string.mux_close_tab) {
+            showMuxCloseConfirmation()
+        }
+        muxNextButton = compactToolbarButton("▶", R.string.mux_next_tab) {
+            runMuxCommand(getString(R.string.mux_switching_tab)) {
+                NativeBridge.nativeMuxActivateRelative(1)
+            }
         }
         statusBar.addView(
             statusText,
@@ -333,6 +348,15 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
+        listOf(
+            muxPreviousButton,
+            muxNewButton,
+            muxCloseButton,
+            muxNextButton,
+        ).forEach { button ->
+            button.visibility = View.GONE
+            statusBar.addView(button)
+        }
         contentColumn.addView(
             statusBar,
             0,
@@ -342,51 +366,6 @@ class MainActivity : AppCompatActivity() {
             ),
         )
 
-        muxTabText = TextView(this).apply {
-            text = getString(R.string.mux_no_tabs)
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            maxLines = 1
-        }
-        muxPreviousButton = compactToolbarButton("◀", R.string.mux_previous_tab) {
-            runMuxCommand(getString(R.string.mux_switching_tab)) {
-                NativeBridge.nativeMuxActivateRelative(-1)
-            }
-        }
-        muxNewButton = compactToolbarButton("+", R.string.mux_new_tab) {
-            runMuxCommand(getString(R.string.mux_creating_tab), NativeBridge::nativeMuxSpawnTab)
-        }
-        muxCloseButton = compactToolbarButton("×", R.string.mux_close_tab) {
-            showMuxCloseConfirmation()
-        }
-        muxNextButton = compactToolbarButton("▶", R.string.mux_next_tab) {
-            runMuxCommand(getString(R.string.mux_switching_tab)) {
-                NativeBridge.nativeMuxActivateRelative(1)
-            }
-        }
-        muxToolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(10), dp(2), dp(6), dp(2))
-            setBackgroundColor(Color.rgb(17, 22, 31))
-            addView(
-                muxTabText,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            addView(muxPreviousButton)
-            addView(muxNewButton)
-            addView(muxCloseButton)
-            addView(muxNextButton)
-        }
-        contentColumn.addView(
-            muxToolbar,
-            1,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
         contentColumn.addView(
             terminalKeyboard,
             LinearLayout.LayoutParams(
@@ -405,7 +384,13 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.renderer_failed, detail)
                 }
             }
-            if (ready) maybeAutoReconnectMux()
+            if (ready) {
+                // Returning from settings (or a recreated Surface) must always
+                // end with one explicit resize so the remote PTY follows the
+                // new cell grid even if the Surface path already applied it.
+                applyTerminalZoomFromPreferences(force = true)
+                maybeAutoReconnectMux()
+            }
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, windowInsets ->
@@ -454,6 +439,18 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         persistComposerDraftsNow(terminalKeyboard.composerDraftSnapshot())
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applyTerminalZoomFromPreferences()
+    }
+
+    private fun applyTerminalZoomFromPreferences(force: Boolean = false) {
+        val percent = TerminalZoom.load(this)
+        if (!force && percent == appliedTerminalZoom) return
+        appliedTerminalZoom = percent
+        NativeBridge.nativeSetTerminalZoom(percent)
     }
 
     override fun onStop() {
@@ -748,7 +745,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyMuxTabs(tabs: JSONArray, updateStatus: Boolean = true) {
+    private fun applyMuxTabs(tabs: JSONArray) {
         muxTabCount = tabs.length()
         var activeIndex = -1
         var activeTitle = ""
@@ -790,25 +787,16 @@ class MainActivity : AppCompatActivity() {
         activeRemoteTabId?.let(::persistPreferredMuxTabId)
 
         if (muxTabCount == 0) {
-            muxTabText.text = getString(R.string.mux_no_tabs)
-            if (updateStatus) statusText.text = getString(R.string.mux_no_tabs_status)
+            statusText.text = getString(R.string.mux_no_tabs_status)
         } else {
             val displayIndex = if (activeIndex >= 0) activeIndex + 1 else 1
             val displayTitle = activeTitle.ifBlank { getString(R.string.mux_untitled_tab) }.take(80)
-            muxTabText.text = getString(
-                R.string.mux_tab_summary,
+            statusText.text = getString(
+                R.string.mux_active_tab,
                 displayIndex,
                 muxTabCount,
                 displayTitle,
             )
-            if (updateStatus) {
-                statusText.text = getString(
-                    R.string.mux_active_tab,
-                    displayIndex,
-                    muxTabCount,
-                    displayTitle,
-                )
-            }
         }
         updateTerminalInputState()
         updateConnectionControls()
@@ -1077,8 +1065,7 @@ class MainActivity : AppCompatActivity() {
         activeMuxRemoteTabId = null
         terminalKeyboard.switchComposerContext(null)
         muxTabCount = 0
-        muxTabText.text = getString(R.string.mux_no_tabs)
-        muxToolbar.visibility = View.GONE
+        statusText.text = getString(R.string.mux_no_tabs_status)
         terminalSurface.scrollToBottom()
     }
 
@@ -1304,7 +1291,13 @@ class MainActivity : AppCompatActivity() {
         muxButton.isEnabled = !sshActive && !muxCommandInFlight
         muxButton.alpha = if (muxButton.isEnabled) 1f else 0.45f
 
-        muxToolbar.visibility = if (muxReady) View.VISIBLE else View.GONE
+        val muxControlsVisibility = if (muxReady) View.VISIBLE else View.GONE
+        listOf(
+            muxPreviousButton,
+            muxNewButton,
+            muxCloseButton,
+            muxNextButton,
+        ).forEach { button -> button.visibility = muxControlsVisibility }
         val canSwitch = muxReady && muxTabCount > 1 && !muxCommandInFlight
         muxPreviousButton.isEnabled = canSwitch
         muxNextButton.isEnabled = canSwitch

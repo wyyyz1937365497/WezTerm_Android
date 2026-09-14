@@ -10,12 +10,13 @@ use raw_window_handle::{
     AndroidDisplayHandle, AndroidNdkWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use wezterm_android_core::{
     android_key_bytes, idle_cat_ansi, TerminalModel, TerminalSnapshot, UPSTREAM_WEZTERM_REVISION,
@@ -50,12 +51,21 @@ thread_local! {
     static LAST_MUX_SNAPSHOT: RefCell<Option<TerminalSnapshot>> = const { RefCell::new(None) };
     static LAST_VIEW_SNAPSHOT: RefCell<Option<TerminalSnapshot>> = const { RefCell::new(None) };
     static VIEW_INTERACTION: RefCell<ViewInteraction> = const { RefCell::new(ViewInteraction::new()) };
+    // SSHMUX scrollback viewport anchors are remembered per remote tab so a
+    // switch (toolbar, restore, or another client) returns to the position
+    // the user left in that tab instead of sharing one global offset.
+    static MUX_TAB_VIEWPORTS: RefCell<HashMap<usize, Option<isize>>> =
+        RefCell::new(HashMap::new());
+    static MUX_ACTIVE_TAB: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 static LOGGING: Once = Once::new();
 static SSH_SESSION: OnceLock<Mutex<Option<AndroidSshSession>>> = OnceLock::new();
 static MUX_SESSION: OnceLock<Mutex<Option<AndroidMuxSession>>> = OnceLock::new();
 static MUX_READY: AtomicBool = AtomicBool::new(false);
+static TERMINAL_ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
+const TERMINAL_ZOOM_MIN_PERCENT: u32 = 50;
+const TERMINAL_ZOOM_MAX_PERCENT: u32 = 200;
 const MAX_TERMINAL_CELLS: usize = 65_536;
 const GLYPH_ATLAS_WIDTH: u32 = 1024;
 const GLYPH_ATLAS_HEIGHT: u32 = 1024;
@@ -94,6 +104,9 @@ impl CellSelection {
 struct ViewInteraction {
     viewport_offset: usize,
     max_viewport_offset: usize,
+    /// Absolute physical row anchoring the viewport while browsing history.
+    /// `None` follows the live bottom.
+    pinned_top: Option<isize>,
     selection: Option<CellSelection>,
 }
 
@@ -102,6 +115,7 @@ impl ViewInteraction {
         Self {
             viewport_offset: 0,
             max_viewport_offset: 0,
+            pinned_top: None,
             selection: None,
         }
     }
@@ -109,11 +123,17 @@ impl ViewInteraction {
     fn observe_snapshot(&mut self, snapshot: &TerminalSnapshot) {
         self.viewport_offset = snapshot.viewport_offset;
         self.max_viewport_offset = snapshot.max_viewport_offset;
+        self.pinned_top = if snapshot.viewport_offset > 0 {
+            Some(snapshot.viewport_top)
+        } else {
+            None
+        };
     }
 
     fn reset(&mut self) {
         self.viewport_offset = 0;
         self.max_viewport_offset = 0;
+        self.pinned_top = None;
         self.selection = None;
     }
 }
@@ -163,9 +183,17 @@ struct PreparedTerminal {
     multi_glyph_cells: usize,
 }
 
+fn terminal_zoom_scale() -> f32 {
+    let percent = TERMINAL_ZOOM_PERCENT
+        .load(Ordering::SeqCst)
+        .clamp(TERMINAL_ZOOM_MIN_PERCENT, TERMINAL_ZOOM_MAX_PERCENT);
+    percent as f32 / 100.0
+}
+
 fn cell_size(density_dpi: u32) -> [f32; 2] {
     let density_scale = density_dpi.max(120) as f32 / 160.0;
-    [11.0 * density_scale, 21.0 * density_scale]
+    let zoom = terminal_zoom_scale();
+    [11.0 * density_scale * zoom, 21.0 * density_scale * zoom]
 }
 
 fn font_pixel_height(density_dpi: u32) -> u32 {
@@ -228,14 +256,14 @@ fn terminal_snapshot_for_surface(width: u32, height: u32, density_dpi: u32) -> T
         TERMINAL.with(|slot| slot.borrow_mut().replace(model));
         return snapshot;
     }
-    let viewport_offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
+    let pinned_top = VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
     TERMINAL.with(|slot| {
         let mut slot = slot.borrow_mut();
         let model = slot.get_or_insert_with(|| {
             TerminalModel::new(columns, rows, width as usize, height as usize, density_dpi)
         });
         model.resize(columns, rows, width as usize, height as usize, density_dpi);
-        model.snapshot_with_scrollback_offset(viewport_offset)
+        model.snapshot_with_viewport_top(pinned_top)
     })
 }
 
@@ -474,6 +502,7 @@ struct Renderer {
     view_bind_group: wgpu::BindGroup,
     surface_config: wgpu::SurfaceConfiguration,
     density_dpi: u32,
+    zoom_percent: u32,
     font_set: FontSet,
     _instance: wgpu::Instance,
     _native_window: NativeWindowOwner,
@@ -734,6 +763,7 @@ impl Renderer {
             view_bind_group,
             surface_config,
             density_dpi,
+            zoom_percent: TERMINAL_ZOOM_PERCENT.load(Ordering::SeqCst),
             font_set,
             _instance: instance,
             _native_window: native_window_owner,
@@ -785,6 +815,12 @@ impl Renderer {
         terminal: &TerminalSnapshot,
         selection: Option<CellSelection>,
     ) -> Result<()> {
+        let zoom_percent = TERMINAL_ZOOM_PERCENT.load(Ordering::SeqCst);
+        if zoom_percent != self.zoom_percent {
+            self.zoom_percent = zoom_percent;
+            self.font_set = build_font_set(self.density_dpi)?;
+            log::info!("rebuilt glyph fonts for terminal zoom {zoom_percent}%");
+        }
         let uniform = Self::uniform(
             self.surface_config.width,
             self.surface_config.height,
@@ -1042,14 +1078,14 @@ fn feed_terminal_and_render(bytes: &[u8]) -> Result<()> {
     if bytes.is_empty() {
         return Ok(());
     }
-    let viewport_offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
+    let pinned_top = VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
     let terminal = TERMINAL.with(|slot| {
         let mut slot = slot.borrow_mut();
         let model = slot
             .as_mut()
             .ok_or_else(|| anyhow!("terminal model is not initialized"))?;
         model.feed(bytes);
-        Ok::<_, anyhow::Error>(model.snapshot_with_scrollback_offset(viewport_offset))
+        Ok::<_, anyhow::Error>(model.snapshot_with_viewport_top(pinned_top))
     })?;
     render_terminal_snapshot(&terminal)
 }
@@ -1062,19 +1098,76 @@ fn pump_mux_terminal() -> Result<bool> {
     if !RENDERER.with(|slot| slot.borrow().is_some()) {
         return Ok(false);
     }
-    let viewport_offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
-    let snapshot = {
+    let pinned_top = VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
+    let fetched = {
         let slot = mux_session_slot()
             .lock()
             .map_err(|_| anyhow!("SSHMUX session lock is poisoned"))?;
         let Some(session) = slot.as_ref() else {
             return Ok(false);
         };
-        session.snapshot_with_scrollback_offset(viewport_offset)?
+        session.snapshot_with_viewport_top(pinned_top)?
     };
-    let Some(snapshot) = snapshot else {
+    let Some(mut snapshot) = fetched else {
         return Ok(false);
     };
+
+    let active_tab = snapshot
+        .tabs
+        .iter()
+        .find(|tab| tab.active)
+        .map(|tab| tab.remote_tab_id);
+    let previous_tab = MUX_ACTIVE_TAB.with(|cell| cell.replace(active_tab));
+    if let (Some(previous), Some(active_id)) = (previous_tab, active_tab) {
+        if previous != active_id {
+            // The anchor just used belongs to the tab we left; save it and
+            // restore the incoming tab's own anchor. This covers every switch
+            // path: toolbar buttons, auto-reattach restore, and another
+            // WezTerm client changing the active tab remotely.
+            let outgoing_anchor =
+                VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
+            MUX_TAB_VIEWPORTS.with(|slots| {
+                slots.borrow_mut().insert(previous, outgoing_anchor);
+            });
+            let incoming_anchor = MUX_TAB_VIEWPORTS
+                .with(|slots| slots.borrow_mut().get(&active_id).copied().flatten());
+            VIEW_INTERACTION.with(|interaction| {
+                let mut interaction = interaction.borrow_mut();
+                interaction.pinned_top = incoming_anchor;
+                interaction.selection = None;
+            });
+            LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
+            let refetched = {
+                let slot = mux_session_slot()
+                    .lock()
+                    .map_err(|_| anyhow!("SSHMUX session lock is poisoned"))?;
+                match slot.as_ref() {
+                    Some(session) => session.snapshot_with_viewport_top(incoming_anchor)?,
+                    None => None,
+                }
+            };
+            let Some(refetched) = refetched else {
+                return Ok(false);
+            };
+            snapshot = refetched;
+        }
+    }
+    if let Some(active_id) = active_tab {
+        // Normalize the stored anchor against the effective (clamped) top.
+        let anchor = if snapshot.terminal.viewport_offset > 0 {
+            Some(snapshot.terminal.viewport_top)
+        } else {
+            None
+        };
+        MUX_TAB_VIEWPORTS.with(|slots| {
+            slots.borrow_mut().insert(active_id, anchor);
+        });
+    }
+    MUX_TAB_VIEWPORTS.with(|slots| {
+        slots
+            .borrow_mut()
+            .retain(|tab_id, _| snapshot.tabs.iter().any(|tab| tab.remote_tab_id == *tab_id));
+    });
     let changed = LAST_MUX_SNAPSHOT.with(|last| {
         let mut last = last.borrow_mut();
         if last.as_ref() == Some(&snapshot.terminal) {
@@ -1119,14 +1212,13 @@ fn refresh_terminal_view() -> Result<usize> {
         // upstream adaptive fetch completes.
         let _ = pump_mux_terminal()?;
     } else {
-        let viewport_offset =
-            VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
+        let pinned_top = VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
         let terminal = TERMINAL.with(|slot| {
             let slot = slot.borrow();
             let model = slot
                 .as_ref()
                 .ok_or_else(|| anyhow!("terminal model is not initialized"))?;
-            Ok::<_, anyhow::Error>(model.snapshot_with_scrollback_offset(viewport_offset))
+            Ok::<_, anyhow::Error>(model.snapshot_with_viewport_top(pinned_top))
         })?;
         render_terminal_snapshot(&terminal)?;
     }
@@ -1136,6 +1228,8 @@ fn refresh_terminal_view() -> Result<usize> {
 fn reset_view_interaction() {
     VIEW_INTERACTION.with(|interaction| interaction.borrow_mut().reset());
     LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
+    // The next pump observes the active tab afresh; per-tab anchors persist.
+    MUX_ACTIVE_TAB.with(|cell| cell.take());
 }
 
 fn point_from_surface_pixels(x: f32, y: f32) -> Option<CellPoint> {
@@ -1195,19 +1289,34 @@ fn redraw_last_view() -> Result<()> {
 fn scroll_viewport(delta_rows: isize) -> Result<usize> {
     let changed = VIEW_INTERACTION.with(|interaction| {
         let mut interaction = interaction.borrow_mut();
-        let prior = interaction.viewport_offset;
-        interaction.viewport_offset = if delta_rows >= 0 {
-            interaction
-                .viewport_offset
-                .saturating_add(delta_rows as usize)
-                .min(interaction.max_viewport_offset)
-        } else {
-            interaction
-                .viewport_offset
-                .saturating_sub(delta_rows.unsigned_abs())
+        if delta_rows == 0 {
+            return false;
+        }
+        let Some(last) = LAST_VIEW_SNAPSHOT.with(|last| last.borrow().clone()) else {
+            return false;
         };
+        let live_top = last
+            .viewport_top
+            .saturating_add(isize::try_from(last.viewport_offset).unwrap_or(isize::MAX));
+        let oldest_top = live_top
+            .saturating_sub(isize::try_from(last.max_viewport_offset).unwrap_or(isize::MAX));
+        // Positive deltas scroll up into history (smaller absolute rows).
+        let anchor_top = interaction.pinned_top.unwrap_or(last.viewport_top);
+        let next_top = anchor_top
+            .saturating_sub(delta_rows)
+            .clamp(oldest_top, live_top);
+        let next_offset = usize::try_from(live_top - next_top).unwrap_or(0);
+        let next_pinned = if next_offset > 0 {
+            Some(next_top)
+        } else {
+            None
+        };
+        let changed =
+            next_offset != interaction.viewport_offset || next_pinned != interaction.pinned_top;
+        interaction.viewport_offset = next_offset;
+        interaction.pinned_top = next_pinned;
         interaction.selection = None;
-        prior != interaction.viewport_offset
+        changed
     });
     if changed {
         LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
@@ -1219,6 +1328,42 @@ fn scroll_viewport(delta_rows: isize) -> Result<usize> {
 fn scroll_viewport_to_bottom() -> Result<usize> {
     let offset = VIEW_INTERACTION.with(|interaction| interaction.borrow().viewport_offset);
     scroll_viewport(-(isize::try_from(offset).unwrap_or(isize::MAX)))
+}
+
+/// Applies a terminal zoom percentage (cell scale). Returns null on success.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSetTerminalZoom(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    zoom_percent: jint,
+) -> jstring {
+    ffi_error_string(&mut env, "nativeSetTerminalZoom", || {
+        let zoom_percent =
+            u32::try_from(zoom_percent).context("terminal zoom percent must be non-negative")?;
+        if !(TERMINAL_ZOOM_MIN_PERCENT..=TERMINAL_ZOOM_MAX_PERCENT).contains(&zoom_percent) {
+            bail!(
+                "terminal zoom percent is outside {TERMINAL_ZOOM_MIN_PERCENT}..={TERMINAL_ZOOM_MAX_PERCENT}"
+            );
+        }
+        TERMINAL_ZOOM_PERCENT.store(zoom_percent, Ordering::SeqCst);
+        let geometry = RENDERER.with(|slot| {
+            slot.borrow().as_ref().map(|renderer| {
+                (
+                    renderer.surface_config.width,
+                    renderer.surface_config.height,
+                    renderer.density_dpi,
+                )
+            })
+        });
+        let Some((width, height, density_dpi)) = geometry else {
+            // No live Surface yet: the stored zoom applies at Surface creation.
+            return Ok(());
+        };
+        let snapshot = terminal_snapshot_for_surface(width, height, density_dpi);
+        resize_remote_pty_if_ready()?;
+        render_terminal_snapshot(&snapshot)?;
+        Ok(())
+    })
 }
 
 fn begin_cell_selection(point: CellPoint) -> Result<()> {
@@ -2313,10 +2458,12 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxA
         if delta != -1 && delta != 1 {
             bail!("relative tab delta must be -1 or 1");
         }
+        // No reset here: the next pump detects the active-tab change, saves
+        // the outgoing tab's viewport anchor, and restores the incoming tab's
+        // own anchor. Zeroing here would destroy the outgoing scroll position.
         with_mux_session("activate remote tab", |session| {
             session.activate_relative(delta as isize)
         })?;
-        reset_view_interaction();
         Ok(())
     })
 }
@@ -2330,10 +2477,10 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxA
     ffi_error_string(&mut env, "nativeMuxActivateTab", || {
         let remote_tab_id =
             usize::try_from(remote_tab_id).context("remote tab id must be non-negative")?;
+        // Same as above: the pump owns per-tab anchor save/restore on switch.
         with_mux_session("restore remote tab", |session| {
             session.activate(remote_tab_id)
         })?;
-        reset_view_interaction();
         Ok(())
     })
 }

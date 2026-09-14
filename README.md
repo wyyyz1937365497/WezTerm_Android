@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.1.1`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.0`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -28,6 +28,9 @@ Android 发行版。
 - 普通 SSH：host-key、认证、`xterm-256color` PTY、输入与 resize；
 - SSHMUX：持久远端标签、新建/切换/关闭、安全 Detach、自动重附着和活动标签恢复；
 - 动态标签标题，跟随远端 pane/OSC title 更新；
+- 每个远端标签独立记忆滚动位置，浏览历史时新输出不再推移视野；
+- 设置页终端缩放：滑条调节单元格大小并实时预览行列网格，返回终端自动 resize；
+- 单排紧凑顶部状态栏，最大化终端内容显示区域；
 - 固定底部英文/符号/特殊键键盘，不覆盖终端 Surface；
 - 独立系统 IME 输入框，支持自动换行、按 MUX 标签保存草稿并整串发送；
 - 单指发送远端滚轮给 TUI，双指浏览本地历史；
@@ -39,6 +42,14 @@ Android 发行版。
 完整目标和模块边界见 [架构文档](docs/ARCHITECTURE.md)；开发历程、故障根因、验证
 方法和已知限制见 [维护文档](docs/MAINTENANCE.md)。`docs/` 只维护这两份活文档。
 
+## v0.2.0 更新
+
+- 设置页新增终端缩放：滑条调节单元格大小，预览区用白色网格线勾勒字符位置，
+  返回终端后本地行列与远端 PTY/SSHMUX pane 自动同步 resize；
+- SSHMUX 每个标签独立记忆滚动位置，切换标签（工具栏、自动重附、远端切换）自动恢复；
+- 浏览历史时视口钉在绝对行，新输出在下方追加，不再把正在阅读的内容推出视野；
+- 顶部两排控制按钮合并为一排，图标缩小，增大终端内容显示范围。
+
 ## v0.1.1 更新
 
 - 补充内置 Noto Sans Math fallback，修复数学字母数字符号显示方框；
@@ -49,7 +60,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.1.1-arm64-debug.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.0-arm64-debug.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - 使用 Android debug 签名；

@@ -18,6 +18,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.slider.Slider
 import com.google.android.material.divider.MaterialDivider
 import com.google.android.material.textview.MaterialTextView
 
@@ -98,6 +99,78 @@ class SettingsActivity : AppCompatActivity() {
         }
         content.addView(
             languageButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        content.addView(
+            sectionTitle(R.string.settings_terminal_zoom_title).apply {
+                setPadding(0, dp(28), 0, dp(10))
+            },
+        )
+        content.addView(
+            MaterialTextView(this).apply {
+                setText(R.string.settings_terminal_zoom_summary)
+                textSize = 14f
+                alpha = 0.72f
+                setPadding(0, dp(4), 0, dp(10))
+            },
+        )
+
+        val zoomPreview = TerminalGridPreviewView(this).apply {
+            zoomPercent = TerminalZoom.load(this@SettingsActivity)
+        }
+        val zoomGridLabel = MaterialTextView(this).apply {
+            textSize = 13f
+            alpha = 0.85f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        fun updateZoomGridLabel() {
+            val (columns, rows) = zoomPreview.gridDimensions()
+            zoomGridLabel.text = getString(
+                R.string.settings_terminal_zoom_grid,
+                columns,
+                rows,
+                zoomPreview.zoomPercent,
+            )
+        }
+        zoomPreview.onGridChanged = { _, _ -> updateZoomGridLabel() }
+        content.addView(
+            MaterialCardView(this).apply {
+                radius = dp(12).toFloat()
+                cardElevation = 0f
+                strokeWidth = 0
+                addView(
+                    zoomPreview,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(180),
+                    ),
+                )
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        content.addView(zoomGridLabel)
+        content.addView(
+            Slider(this).apply {
+                valueFrom = TerminalZoom.MIN_PERCENT.toFloat()
+                valueTo = TerminalZoom.MAX_PERCENT.toFloat()
+                stepSize = TerminalZoom.STEP_PERCENT.toFloat()
+                value = zoomPreview.zoomPercent.toFloat()
+                addOnChangeListener { _, value, fromUser ->
+                    if (!fromUser) return@addOnChangeListener
+                    val percent = value.toInt()
+                    zoomPreview.zoomPercent = percent
+                    TerminalZoom.save(this@SettingsActivity, percent)
+                    updateZoomGridLabel()
+                }
+            },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,

@@ -84,10 +84,8 @@
     <string name="mux_close_tab">Close tab</string>
     <string name="mux_detach">Detach</string>
     <string name="mux_detach_description">Safely detach and preserve remote tabs</string>
-    <string name="mux_no_tabs">No remote tabs · use + to create one</string>
     <string name="mux_no_tabs_status">SSHMUX attached · no remote tabs</string>
     <string name="mux_untitled_tab">untitled</string>
-    <string name="mux_tab_summary">%1$d/%2$d · %3$s</string>
     <string name="mux_active_tab">SSHMUX · tab %1$d/%2$d · %3$s</string>
     <string name="mux_switching_tab">Switching remote tab…</string>
     <string name="mux_creating_tab">Creating persistent remote tab…</string>
@@ -122,6 +120,9 @@
     <string name="settings_language_english">English</string>
     <string name="settings_language_simplified_chinese">简体中文</string>
     <string name="settings_developer_title">Developer</string>
+    <string name="settings_terminal_zoom_title">Terminal zoom</string>
+    <string name="settings_terminal_zoom_summary">Drag the slider to change the terminal cell size. The preview outlines every character cell; rows and columns update when you return to the terminal.</string>
+    <string name="settings_terminal_zoom_grid">%1$d cols × %2$d rows · %3$d%%</string>
     <string name="settings_developer_name" translatable="false">wyyyz1937365497</string>
     <string name="settings_developer_description">WezTerm Android is a native Android terminal client that reuses WezTerm terminal, font, rendering, SSH and mux components.</string>
     <string name="settings_version">Version %1$s</string>

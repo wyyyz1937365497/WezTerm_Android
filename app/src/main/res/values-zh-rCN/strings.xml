@@ -80,10 +80,8 @@
     <string name="mux_close_tab">关闭标签页</string>
     <string name="mux_detach">分离</string>
     <string name="mux_detach_description">安全分离并保留远程标签页</string>
-    <string name="mux_no_tabs">没有远程标签页 · 使用 + 新建</string>
     <string name="mux_no_tabs_status">SSHMUX 已附加 · 没有远程标签页</string>
     <string name="mux_untitled_tab">未命名</string>
-    <string name="mux_tab_summary">%1$d/%2$d · %3$s</string>
     <string name="mux_active_tab">SSHMUX · 标签页 %1$d/%2$d · %3$s</string>
     <string name="mux_switching_tab">正在切换远程标签页…</string>
     <string name="mux_creating_tab">正在新建持久化远程标签页…</string>
@@ -114,6 +112,9 @@
     <string name="settings_language_summary">选择终端客户端界面使用的语言。</string>
     <string name="settings_language_system">跟随系统</string>
     <string name="settings_language_english">English</string>
+    <string name="settings_terminal_zoom_title">终端缩放</string>
+    <string name="settings_terminal_zoom_summary">拖动滑条调整终端单元格大小。预览用白线勾勒每个字符单元格；返回终端后行数和列数随之变化。</string>
+    <string name="settings_terminal_zoom_grid">列 %1$d × 行 %2$d · %3$d%%</string>
     <string name="settings_language_simplified_chinese">简体中文</string>
     <string name="settings_developer_title">开发者信息</string>
     <string name="settings_developer_description">WezTerm Android 是原生 Android 终端客户端，复用了 WezTerm 的终端、字体、渲染、SSH 与 MUX 组件。</string>

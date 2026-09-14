@@ -152,6 +152,10 @@ pub struct TerminalSnapshot {
     pub viewport_offset: usize,
     /// Largest valid value for `viewport_offset` in the current scrollback.
     pub max_viewport_offset: usize,
+    /// Absolute physical row of the first visible viewport row. Bottom-aligned
+    /// viewports report the live top; history viewports report the pinned top
+    /// so newly arriving output cannot shift the visible content.
+    pub viewport_top: isize,
     /// Whether each physical row continues into the following row.
     pub wrapped_rows: Vec<bool>,
 }
@@ -301,17 +305,30 @@ impl TerminalModel {
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
-        self.snapshot_with_scrollback_offset(0)
+        self.snapshot_with_viewport_top(None)
     }
 
-    pub fn snapshot_with_scrollback_offset(&self, requested_offset: usize) -> TerminalSnapshot {
+    /// Snapshots the viewport. `pinned_top` anchors the first visible row to
+    /// an absolute physical row while the user browses history; `None` shows
+    /// the live bottom. The returned `viewport_offset` always reflects the
+    /// effective (clamped) distance above the live bottom.
+    pub fn snapshot_with_viewport_top(&self, pinned_top: Option<isize>) -> TerminalSnapshot {
         let size = self.terminal.get_size();
         let cursor = self.terminal.cursor_pos();
         let screen = self.terminal.screen();
         let first_visible_row = screen.phys_row(0);
         let max_viewport_offset = first_visible_row;
-        let viewport_offset = requested_offset.min(max_viewport_offset);
-        let first_view_row = first_visible_row.saturating_sub(viewport_offset);
+        let live_top = isize::try_from(first_visible_row).unwrap_or(isize::MAX);
+        let first_view_row: usize = match pinned_top {
+            Some(top) => {
+                let oldest =
+                    live_top.saturating_sub(isize::try_from(max_viewport_offset).unwrap_or(0));
+                let clamped = top.clamp(oldest, live_top);
+                usize::try_from(clamped).unwrap_or(0)
+            }
+            None => first_visible_row,
+        };
+        let viewport_offset = first_visible_row.saturating_sub(first_view_row);
         let lines = screen.lines_in_phys_range(first_view_row..first_view_row + size.rows);
         let mut cells = Vec::new();
         let palette = android_palette();
@@ -356,6 +373,7 @@ impl TerminalModel {
             cells,
             viewport_offset,
             max_viewport_offset,
+            viewport_top: first_view_row as isize,
             wrapped_rows,
         }
     }
@@ -522,11 +540,31 @@ mod tests {
         }
 
         let bottom = model.snapshot();
-        let oldest = model.snapshot_with_scrollback_offset(usize::MAX);
+        let oldest = model.snapshot_with_viewport_top(Some(isize::MIN));
         assert!(bottom.max_viewport_offset > 0);
         assert_eq!(oldest.viewport_offset, oldest.max_viewport_offset);
         assert_ne!(bottom.cells, oldest.cells);
         assert_eq!(oldest.cursor_row, oldest.rows);
+    }
+
+    #[test]
+    fn keeps_pinned_viewport_content_stable_while_output_arrives() {
+        let mut model = model();
+        for index in 0..30 {
+            model.feed(format!("line-{index}\r\n"));
+        }
+        let first_pinned = model.snapshot_with_viewport_top(Some(5));
+        assert_eq!(first_pinned.viewport_top, 5);
+        assert!(first_pinned.viewport_offset > 0);
+
+        for index in 30..40 {
+            model.feed(format!("line-{index}\r\n"));
+        }
+        // The stale offset would have shifted the view; the anchor must not.
+        let repinned = model.snapshot_with_viewport_top(Some(5));
+        assert_eq!(repinned.viewport_top, 5);
+        assert!(repinned.viewport_offset > first_pinned.viewport_offset);
+        assert_eq!(first_pinned.cells, repinned.cells);
     }
 
     #[test]

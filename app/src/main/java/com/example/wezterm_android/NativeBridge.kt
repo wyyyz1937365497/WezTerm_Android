@@ -44,6 +44,10 @@ internal object NativeBridge {
     @JvmStatic
     external fun nativeSelectionClear()
 
+    /** Returns null on success or a user-displayable error string. */
+    @JvmStatic
+    external fun nativeSetTerminalZoom(zoomPercent: Int): String?
+
     @JvmStatic
     external fun nativeSelectionText(): String?
 

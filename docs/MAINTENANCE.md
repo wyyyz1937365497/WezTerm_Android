@@ -1,8 +1,8 @@
 # WezTerm Android 开发与维护记录
 
-最后更新：2026-09-09
+最后更新：2026-09-14
 
-当前版本：`v0.1.1`
+当前版本：`v0.2.0`
 
 主分支：`main`
 
@@ -37,9 +37,10 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | 发布性质 | ARM64、debug 签名、GitHub Release |
 
 当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、普通
-SSH、SSHMUX、动态标签标题、安全分离、标签控制与活动标签恢复、应用内键盘、自动换行
-且按标签隔离草稿的中文输入框、TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3
-设置、中英文界面和失效连接自动重附着。
+SSH、SSHMUX、动态标签标题、安全分离、标签控制与活动标签恢复、每标签独立滚动位置与
+历史视口锚定、设置页终端缩放、单排顶部状态栏、应用内键盘、自动换行且按标签隔离草稿
+的中文输入框、TUI 滚轮、历史回滚、长按选择、系统剪贴板、Material 3 设置、中英文界面
+和失效连接自动重附着。
 
 ## 3. 开发历程
 
@@ -157,6 +158,24 @@ SSH、SSHMUX、动态标签标题、安全分离、标签控制与活动标签�
   Rust runtime 在首个可见快照前重新聚焦对应标签；
 - Launcher 使用 WezTerm 上游 `assets/icon/terminal.png`，外加黑色安全边距，避免
   adaptive icon mask 裁掉原图边缘。
+
+### 3.9 终端缩放、标签滚动隔离与单排状态栏
+
+发布版本：`v0.2.0`
+
+- 设置页新增终端缩放滑条（50%–200%，步进 5%）：原生 `cell_size` 按百分比缩放，
+  行列数随之增减；缩放变化时按新像素高度重建字体集，字形保持清晰；预览区用白色
+  1px 网格勾勒每个字符单元格；
+- 返回终端时渲染器就绪回调强制执行一次完整缩放应用：重建字体、重算本地模型行列、
+  `resize_remote_pty_if_ready` 同步远端 SSH PTY 与 SSHMUX pane，再重新渲染；
+- `TerminalSnapshot` 新增 `viewport_top` 绝对行锚定语义：浏览历史时视口钉在绝对
+  物理行，新输出在实时底部追加，不再把正在阅读的内容推出视野；core 与 mux 两侧
+  快照统一改为 `snapshot_with_viewport_top`；
+- SSHMUX 滚动锚点按远端 tab ID 分别保存在 native `MUX_TAB_VIEWPORTS`，pump 检测
+  活动标签变化时保存离场标签锚点并恢复进场标签锚点，覆盖工具栏切换、自动重附
+  恢复和远端客户端切换三种路径；激活 JNI 不再清空视口；
+- 顶部两排控制按钮合并为一排：MUX 标签四键并入状态栏并按需显示，按钮缩小到
+  10–11sp，标签标题由状态栏文本承载。
 
 `v0.1.0` 发布截图：
 
@@ -298,7 +317,7 @@ cargo test --manifest-path rust/Cargo.toml \
   --locked -- --test-threads=1
 ```
 
-当前四个 app crate 共 30 个主机测试：core 12、font 6、SSH 5、MUX 7。
+当前四个 app crate 共 31 个主机测试：core 13、font 6、SSH 5、MUX 7。
 
 不把以下两类失败误判为 Android 构建失败：
 

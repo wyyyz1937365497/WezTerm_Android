@@ -45,7 +45,7 @@ struct AndroidViewport {
 fn android_viewport(
     dimensions: &RenderableDimensions,
     android_rows: usize,
-    requested_offset: usize,
+    pinned_top: Option<isize>,
 ) -> AndroidViewport {
     let rows = android_rows.max(1);
     // Another client can resize the same remote mux window after Android has
@@ -58,8 +58,14 @@ fn android_viewport(
         .saturating_add(isize::try_from(hidden_remote_rows).unwrap_or(isize::MAX));
     let max_offset =
         usize::try_from(live_top.saturating_sub(dimensions.scrollback_top)).unwrap_or(0);
-    let offset = requested_offset.min(max_offset);
-    let top = live_top.saturating_sub(isize::try_from(offset).unwrap_or(isize::MAX));
+    let oldest_top = live_top.saturating_sub(isize::try_from(max_offset).unwrap_or(isize::MAX));
+    // While the user browses history the viewport is pinned to an absolute
+    // physical row: newly arriving output appends below without shifting the
+    // visible content. `None` keeps the live bottom alignment.
+    let top = match pinned_top {
+        Some(top) => top.clamp(oldest_top, live_top),
+        None => live_top,
+    };
     AndroidViewport {
         top,
         live_top,
@@ -166,7 +172,10 @@ enum RuntimeMessage {
 }
 
 enum RuntimeCommand {
-    Snapshot(usize, Sender<Result<Option<MuxViewSnapshot>, String>>),
+    Snapshot(
+        Option<isize>,
+        Sender<Result<Option<MuxViewSnapshot>, String>>,
+    ),
     Write(Vec<u8>, Sender<Result<(), String>>),
     MouseWheel {
         column: usize,
@@ -263,18 +272,17 @@ impl AndroidMuxSession {
     }
 
     pub fn snapshot(&self) -> anyhow::Result<Option<MuxViewSnapshot>> {
-        self.snapshot_with_scrollback_offset(0)
+        self.snapshot_with_viewport_top(None)
     }
 
-    pub fn snapshot_with_scrollback_offset(
+    pub fn snapshot_with_viewport_top(
         &self,
-        viewport_offset: usize,
+        pinned_top: Option<isize>,
     ) -> anyhow::Result<Option<MuxViewSnapshot>> {
         let (tx, rx) = mpsc::channel();
         self.runtime_tx
             .send(RuntimeMessage::Command(RuntimeCommand::Snapshot(
-                viewport_offset,
-                tx,
+                pinned_top, tx,
             )))?;
         recv_result(rx, "snapshot")
     }
@@ -570,8 +578,8 @@ impl RuntimeState {
 
     fn handle_command(&mut self, command: RuntimeCommand) {
         match command {
-            RuntimeCommand::Snapshot(viewport_offset, reply) => {
-                let result = self.snapshot(viewport_offset).map_err(display_error);
+            RuntimeCommand::Snapshot(pinned_top, reply) => {
+                let result = self.snapshot(pinned_top).map_err(display_error);
                 let _ = reply.send(result);
             }
             RuntimeCommand::Write(bytes, reply) => {
@@ -812,19 +820,19 @@ impl RuntimeState {
         Ok(())
     }
 
-    fn snapshot(&mut self, requested_offset: usize) -> anyhow::Result<Option<MuxViewSnapshot>> {
+    fn snapshot(&mut self, pinned_top: Option<isize>) -> anyhow::Result<Option<MuxViewSnapshot>> {
         self.ensure_attached()?;
         self.ensure_active_pane();
         let Some(pane) = self.active_pane() else {
             return Ok(None);
         };
         let dimensions = pane.get_dimensions();
-        let viewport = android_viewport(&dimensions, self.size.rows, requested_offset);
+        let viewport = android_viewport(&dimensions, self.size.rows, pinned_top);
         let range = viewport.top..viewport.top + viewport.rows as isize;
         // This call drives ClientRenderable's adaptive remote poll.
         let _ = pane.get_changed_since(range.clone(), SEQ_ZERO);
         let (first_row, lines) = pane.get_lines(range);
-        let viewport_offset = usize::try_from(viewport.live_top.saturating_sub(first_row))
+        let viewport_offset = usize::try_from(viewport.live_top.saturating_sub(viewport.top))
             .unwrap_or(0)
             .min(viewport.max_offset);
         let cursor = pane.get_cursor_position();
@@ -876,6 +884,7 @@ impl RuntimeState {
                 cells,
                 viewport_offset,
                 max_viewport_offset: viewport.max_offset,
+                viewport_top: viewport.top,
                 wrapped_rows,
             },
             tabs,
@@ -1066,18 +1075,21 @@ mod tests {
             ..RenderableDimensions::default()
         };
 
-        let live = android_viewport(&dimensions, 17, 0);
+        let live = android_viewport(&dimensions, 17, None);
         assert_eq!(live.live_top, 84);
         assert_eq!(live.top, 84);
         assert_eq!(live.rows, 17);
         assert_eq!(live.max_offset, 104);
 
-        let history = android_viewport(&dimensions, 17, 12);
+        let history = android_viewport(&dimensions, 17, Some(72));
         assert_eq!(history.live_top, 84);
         assert_eq!(history.top, 72);
 
-        let clamped = android_viewport(&dimensions, 17, usize::MAX);
-        assert_eq!(clamped.top, dimensions.scrollback_top);
+        let clamped_old = android_viewport(&dimensions, 17, Some(isize::MIN));
+        assert_eq!(clamped_old.top, dimensions.scrollback_top);
+
+        let clamped_new = android_viewport(&dimensions, 17, Some(isize::MAX));
+        assert_eq!(clamped_new.top, live.live_top);
     }
 
     #[test]
