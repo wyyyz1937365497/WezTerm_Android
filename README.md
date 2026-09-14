@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.2.0`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.1`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -39,8 +39,10 @@ Android 发行版。
 - 纯黑终端、无连接像素猫、Material 3 深色界面；
 - 跟随系统、English、简体中文以及设置页开发者信息。
 
-完整目标和模块边界见 [架构文档](docs/ARCHITECTURE.md)；开发历程、故障根因、验证
-方法和已知限制见 [维护文档](docs/MAINTENANCE.md)。`docs/` 只维护这两份活文档。
+## v0.2.1 更新
+
+- 修复 SSHMUX 下 Surface 重建后终端画面被本地占位内容覆盖的问题：强制缩放应用
+  现在会使上一份 mux 快照失效并重新拉取真实远端窗格，而非渲染本地模型。
 
 ## v0.2.0 更新
 
@@ -60,7 +62,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.0-arm64-debug.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.1-arm64-debug.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - 使用 Android debug 签名；

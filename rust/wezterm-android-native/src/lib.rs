@@ -1361,7 +1361,17 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSetT
         };
         let snapshot = terminal_snapshot_for_surface(width, height, density_dpi);
         resize_remote_pty_if_ready()?;
-        render_terminal_snapshot(&snapshot)?;
+        if MUX_READY.load(Ordering::SeqCst) {
+            // The local TERMINAL model is not the SSHMUX mirror, and the
+            // forced resize above usually keeps the pane size unchanged, so
+            // the next poll would diff-equal and keep whatever frame this
+            // call presented. Invalidate the last mux snapshot and re-pump
+            // the real pane instead of rendering the local frame.
+            LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
+            pump_mux_terminal()?;
+        } else {
+            render_terminal_snapshot(&snapshot)?;
+        }
         Ok(())
     })
 }
