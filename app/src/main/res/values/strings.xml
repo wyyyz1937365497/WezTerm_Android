@@ -15,6 +15,13 @@
     <string name="selection_paste">Paste</string>
     <string name="selection_select_all">Select visible screen</string>
     <string name="selection_cancel">Cancel</string>
+    <string name="selection_save">Save</string>
+    <string name="selection_save_description">Save the viewport and live output to the Download folder</string>
+    <string name="selection_saved">Saved to Downloads/%1$s</string>
+    <string name="selection_save_pending">Exporting viewport…</string>
+    <string name="selection_save_permission">Storage permission is required to save to the Download folder</string>
+    <string name="selection_save_unavailable">Export is unavailable</string>
+    <string name="selection_save_failed">Save failed: %1$s</string>
     <string name="selection_mode_active">Selection mode · drag to extend the selection</string>
     <string name="selection_empty">The selection has no text to copy</string>
     <string name="selection_clipboard_label">WezTerm terminal text</string>

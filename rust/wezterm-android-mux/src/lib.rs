@@ -190,6 +190,10 @@ enum RuntimeCommand {
     SpawnTab(Sender<Result<(), String>>),
     CloseActiveTab(Sender<Result<(), String>>),
     Detach(Sender<Result<(), String>>),
+    FetchViewportText(
+        Option<isize>,
+        Sender<Result<Option<String>, String>>,
+    ),
 }
 
 struct RuntimeState {
@@ -285,6 +289,16 @@ impl AndroidMuxSession {
                 pinned_top, tx,
             )))?;
         recv_result(rx, "snapshot")
+    }
+
+    /// Cloneable `Send + Sync` subset of the session: only the runtime
+    /// command sender. Callers clone this under the session mutex and then
+    /// wait for replies without holding that mutex, so the UI pump keeps
+    /// making progress while an export RPC hydrates.
+    pub fn command_handle(&self) -> AndroidMuxCommandHandle {
+        AndroidMuxCommandHandle {
+            runtime_tx: self.runtime_tx.clone(),
+        }
     }
 
     pub fn write(&self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -581,6 +595,9 @@ impl RuntimeState {
             RuntimeCommand::Snapshot(pinned_top, reply) => {
                 let result = self.snapshot(pinned_top).map_err(display_error);
                 let _ = reply.send(result);
+            }
+            RuntimeCommand::FetchViewportText(pinned_top, reply) => {
+                self.fetch_viewport_text_async(pinned_top, reply);
             }
             RuntimeCommand::Write(bytes, reply) => {
                 let result = self.write(&bytes).map_err(display_error);
@@ -891,6 +908,93 @@ impl RuntimeState {
         }))
     }
 
+    /// Validates the export request on the runtime thread, then performs the
+    /// direct client `GetLines` RPC on the executor so the runtime loop can
+    /// keep draining commands while rows hydrate. The original command reply
+    /// is delivered from the async closure.
+    fn fetch_viewport_text_async(
+        &mut self,
+        pinned_top: Option<isize>,
+        reply: Sender<Result<Option<String>, String>>,
+    ) {
+        let failure = |message: String| {
+            let _ = reply.send(Err(message));
+        };
+        if let Err(error) = self.ensure_attached() {
+            failure(format!("{error:#}"));
+            return;
+        }
+        self.ensure_active_pane();
+        let Some(pane) = self.active_pane() else {
+            failure("no active remote pane".into());
+            return;
+        };
+        let Some(client_pane) = pane.downcast_ref::<ClientPane>() else {
+            failure("active SSHMUX pane is not a ClientPane".into());
+            return;
+        };
+        let dimensions = pane.get_dimensions();
+        let rows = self.size.rows.max(1);
+        let viewport = android_viewport(&dimensions, rows, pinned_top);
+        let live_cursor = pane.get_cursor_position();
+        let cursor_phys_row = live_cursor
+            .y
+            .max(dimensions.scrollback_top)
+            .min(viewport.live_top.saturating_add(rows as isize));
+        let end = cursor_phys_row.max(viewport.top);
+        if end < viewport.top {
+            failure("viewport export range is empty".into());
+            return;
+        }
+        let Ok(inner) = ClientDomain::get_client_inner_for_domain(self.domain.domain_id()) else {
+            failure("SSHMUX domain has no assigned client".into());
+            return;
+        };
+        let remote_pane_id = client_pane.remote_pane_id;
+        let columns = self.size.cols.max(1);
+        let cursor_column = live_cursor.x.min(columns);
+        let range = viewport.top..end.saturating_add(1);
+        promise::spawn::spawn(async move {
+            let outcome = async {
+                let response = inner
+                    .client
+                    .get_lines(codec::GetLines {
+                        pane_id: remote_pane_id,
+                        lines: vec![range],
+                    })
+                    .await?;
+                let (lines, _images) = response.lines.extract_data();
+                let mut result = String::new();
+                for (index, (_, line)) in lines.iter().enumerate() {
+                    if index + 1 == lines.len() {
+                        let mut row_text = String::new();
+                        let mut last_start: Option<usize> = None;
+                        for cell in line.visible_cells() {
+                            let start_column = cell.cell_index();
+                            if start_column >= cursor_column {
+                                break;
+                            }
+                            if last_start == Some(start_column) {
+                                continue;
+                            }
+                            row_text.push_str(cell.str());
+                            last_start = Some(start_column);
+                        }
+                        result.push_str(row_text.trim_end_matches(' '));
+                    } else {
+                        result.push_str(line.as_str().trim_end_matches(' '));
+                        if !line.last_cell_was_wrapped() {
+                            result.push('\n');
+                        }
+                    }
+                }
+                Ok(Some(result))
+            };
+            let _ = reply.send(outcome.await.map_err(|error: anyhow::Error| format!("{error:#}")));
+        })
+        .detach();
+    }
+
     fn emit_tabs_changed(&mut self) {
         self.ensure_active_pane();
         let tabs: Vec<_> = self.tab_handles().into_iter().map(|tab| tab.info).collect();
@@ -1007,6 +1111,45 @@ fn mouse_wheel_event(column: usize, row: usize, delta: isize) -> MouseEvent {
     }
 }
 
+/// Cloneable, lock-free handle onto the mux runtime command queue.
+#[derive(Clone)]
+pub struct AndroidMuxCommandHandle {
+    runtime_tx: Sender<RuntimeMessage>,
+}
+
+impl AndroidMuxCommandHandle {
+    /// Queues one cross-scrollback text export and returns the reply
+    /// channel. The runtime thread answers from the executor, so waiting on
+    /// the receiver never blocks the runtime loop.
+    pub fn begin_viewport_export(
+        &self,
+        pinned_top: Option<isize>,
+    ) -> anyhow::Result<Receiver<Result<Option<String>, String>>> {
+        let (tx, rx) = mpsc::channel();
+        self.runtime_tx
+            .send(RuntimeMessage::Command(RuntimeCommand::FetchViewportText(
+                pinned_top, tx,
+            )))?;
+        Ok(rx)
+    }
+}
+
+/// Waits for a queued [`AndroidMuxCommandHandle::begin_viewport_export`]
+/// reply. `timeout` is caller-chosen because a long scrollback export is a
+/// deliberate user action and may legitimately exceed [`COMMAND_TIMEOUT`].
+pub fn wait_viewport_export(
+    rx: Receiver<Result<Option<String>, String>>,
+    timeout: Duration,
+) -> anyhow::Result<Option<String>> {
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(anyhow!(error)),
+        Err(RecvTimeoutError::Timeout) => bail!("viewport export timed out"),
+        Err(RecvTimeoutError::Disconnected) => {
+            bail!("SSHMUX runtime stopped during viewport export")
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,3 +1292,4 @@ mod tests {
         assert!(tabs_differ(Some(&original), &renamed));
     }
 }
+

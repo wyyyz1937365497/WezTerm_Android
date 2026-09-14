@@ -17,6 +17,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::LazyLock;
 use std::sync::{Mutex, Once, OnceLock};
 use wezterm_android_core::{
     android_key_bytes, idle_cat_ansi, TerminalModel, TerminalSnapshot, UPSTREAM_WEZTERM_REVISION,
@@ -26,6 +28,7 @@ use wezterm_android_font::{
 };
 use wezterm_android_mux::{
     AndroidMuxSession, MuxEndpoint, MuxEvent, WEZTERM_REVISION as MUX_UPSTREAM_WEZTERM_REVISION,
+    wait_viewport_export,
 };
 use wezterm_android_ssh::{
     AndroidSshConfig, AndroidSshSession, ClientEvent, PtySize, SshEndpoint,
@@ -64,6 +67,15 @@ static SSH_SESSION: OnceLock<Mutex<Option<AndroidSshSession>>> = OnceLock::new()
 static MUX_SESSION: OnceLock<Mutex<Option<AndroidMuxSession>>> = OnceLock::new();
 static MUX_READY: AtomicBool = AtomicBool::new(false);
 static TERMINAL_ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
+/// Reply channel for one in-flight SSHMUX viewport export. Stored by the
+/// UI-thread `nativeBeginViewportExport` and drained by a worker thread in
+/// `nativeViewportExportWait`, so the blocking RPC wait never runs on the
+/// UI thread and never holds the session mutex.
+static PENDING_VIEWPORT_EXPORT: LazyLock<Mutex<Option<Receiver<Result<Option<String>, String>>>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// A long scrollback export is a deliberate user action; give the remote
+/// `GetLines` round trip more room than interactive commands.
+const VIEWPORT_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const TERMINAL_ZOOM_MIN_PERCENT: u32 = 50;
 const TERMINAL_ZOOM_MAX_PERCENT: u32 = 200;
 const MAX_TERMINAL_CELLS: usize = 65_536;
@@ -1864,6 +1876,108 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSele
         .ok()
         .flatten();
     return_java_string(&mut env, value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeBeginViewportExport(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    init_logging();
+    let envelope =
+        catch_unwind(AssertUnwindSafe(begin_viewport_export_envelope)).unwrap_or_else(|_| {
+            serde_json::json!({"ok": false, "error": "viewport export panicked"}).to_string()
+        });
+    return_java_string(&mut env, Some(envelope))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeViewportExportWait(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    init_logging();
+    let envelope = catch_unwind(AssertUnwindSafe(wait_viewport_export_envelope)).unwrap_or_else(
+        |_| serde_json::json!({"ok": false, "error": "viewport export panicked"}).to_string(),
+    );
+    return_java_string(&mut env, Some(envelope))
+}
+
+/// Runs on the JNI/UI thread that owns the terminal thread-locals: captures
+/// the current viewport anchor and either queues the SSHMUX export (returns
+/// a `pending` envelope for the worker thread) or exports the local SSH
+/// terminal text inline (fast, in-memory).
+fn begin_viewport_export_envelope() -> String {
+    let pinned_top = VIEW_INTERACTION.with(|interaction| interaction.borrow().pinned_top);
+    let mux_handle = {
+        match mux_session_slot().lock() {
+            Ok(slot) => slot.as_ref().map(AndroidMuxSession::command_handle),
+            Err(_) => {
+                log::error!("nativeBeginViewportExport: SSHMUX session lock is poisoned");
+                None
+            }
+        }
+    };
+    if let Some(handle) = mux_handle {
+        return match handle.begin_viewport_export(pinned_top) {
+            Ok(rx) => match PENDING_VIEWPORT_EXPORT.lock() {
+                Ok(mut pending) => {
+                    *pending = Some(rx);
+                    serde_json::json!({"pending": true}).to_string()
+                }
+                Err(_) => serde_json::json!({
+                    "ok": false,
+                    "error": "viewport export state is unavailable"
+                })
+                .to_string(),
+            },
+            Err(error) => serde_json::json!({"ok": false, "error": format!("{error:#}")})
+                .to_string(),
+        };
+    }
+    let local = TERMINAL.with(|slot| {
+        let slot = slot.borrow();
+        let model = slot
+            .as_ref()
+            .ok_or_else(|| anyhow!("there is no active SSHMUX session or SSH terminal"))?;
+        Ok::<_, anyhow::Error>(model.text_from_viewport_top(pinned_top))
+    });
+    match local {
+        Ok(text) => serde_json::json!({"ok": true, "text": text}).to_string(),
+        Err(error) => {
+            serde_json::json!({"ok": false, "error": format!("{error:#}")}).to_string()
+        }
+    }
+}
+
+/// Runs on a Kotlin worker thread: touches only global state, never the UI
+/// thread's thread-locals. Blocks until the SSHMUX executor replies.
+fn wait_viewport_export_envelope() -> String {
+    let rx = match PENDING_VIEWPORT_EXPORT.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": "viewport export state is unavailable"
+            })
+            .to_string();
+        }
+    };
+    let Some(rx) = rx else {
+        return serde_json::json!({"ok": false, "error": "no pending viewport export"})
+            .to_string();
+    };
+    match wait_viewport_export(rx, VIEWPORT_EXPORT_TIMEOUT) {
+        Ok(Some(text)) => serde_json::json!({"ok": true, "text": text}).to_string(),
+        Ok(None) => serde_json::json!({
+            "ok": false,
+            "error": "SSHMUX pane produced no text"
+        })
+        .to_string(),
+        Err(error) => {
+            serde_json::json!({"ok": false, "error": format!("{error:#}")}).to_string()
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

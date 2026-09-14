@@ -48,6 +48,7 @@ android {
             // the provision-debug-identity.sh workflow working until a real
             // release signing / key import UI exists.
             isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

@@ -1,14 +1,20 @@
 package com.example.wezterm_android
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.text.InputType
 import android.view.ActionMode
 import android.view.Gravity
@@ -31,6 +37,10 @@ import com.google.android.material.textfield.TextInputLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.concurrent.thread
 import kotlin.math.max
 
 private data class DialogTextField(
@@ -68,6 +78,7 @@ class MainActivity : AppCompatActivity() {
     private var muxReconnectScheduled = false
     private var muxAutoReconnectStarting = false
     private var lastViewportOffset = 0
+    private var pendingViewportSaveAfterPermission = false
 
     private val retryMuxConnection = Runnable {
         muxReconnectScheduled = false
@@ -83,7 +94,9 @@ class MainActivity : AppCompatActivity() {
                     .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
                 menu.add(0, ACTION_SELECT_ALL, 2, R.string.selection_select_all)
                     .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
-                menu.add(0, ACTION_CANCEL, 3, R.string.selection_cancel)
+                menu.add(0, ACTION_SAVE, 3, R.string.selection_save)
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                menu.add(0, ACTION_CANCEL, 4, R.string.selection_cancel)
                     .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 return true
             }
@@ -105,6 +118,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     ACTION_SELECT_ALL -> {
                         if (terminalSurface.selectAllVisible()) mode.invalidateContentRect()
+                        true
+                    }
+                    ACTION_SAVE -> {
+                        saveTerminalViewport()
                         true
                     }
                     ACTION_CANCEL -> {
@@ -1135,6 +1152,109 @@ class MainActivity : AppCompatActivity() {
         terminalSurface.noteInputReturnedToLiveBottom()
     }
 
+    /**
+     * Saves everything from the top of the viewport the user is looking at
+     * through the live cursor row. The anchor is captured on the UI thread
+     * by the native call; the RPC wait and file write run on a worker
+     * thread. The selection and floating menu stay open.
+     */
+    private fun saveTerminalViewport() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingViewportSaveAfterPermission = true
+            requestPermissions(
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                REQUEST_VIEWPORT_SAVE_PERMISSION,
+            )
+            statusText.text = getString(R.string.selection_save_permission)
+            return
+        }
+        val envelope = NativeBridge.nativeBeginViewportExport()
+        if (envelope == null) {
+            statusText.text = getString(R.string.selection_save_failed, getString(R.string.selection_save_unavailable))
+            return
+        }
+        // The envelope carries everything needed (anchor already captured
+        // on the UI thread); MediaStore/file I/O must stay off the UI
+        // thread for large exports, so both paths write from the worker.
+        statusText.text = getString(R.string.selection_save_pending)
+        thread(name = "viewport-export") {
+            val waited = if (JSONObject(envelope).optBoolean("pending")) {
+                NativeBridge.nativeViewportExportWait()
+                    ?: "{\"ok\":false,\"error\":\"no pending viewport export\"}"
+            } else {
+                envelope
+            }
+            deliverViewportExport(waited)
+        }
+    }
+
+    private fun deliverViewportExport(envelope: String) {
+        val parsed = JSONObject(envelope)
+        if (!parsed.optBoolean("ok")) {
+            postExportStatus(getString(R.string.selection_save_failed, parsed.optString("error")))
+            return
+        }
+        val name = try {
+            writeExportToDownloads(parsed.optString("text"))
+        } catch (failure: Throwable) {
+            postExportStatus(
+                getString(
+                    R.string.selection_save_failed,
+                    failure.message ?: failure.javaClass.simpleName,
+                ),
+            )
+            return
+        }
+        postExportStatus(getString(R.string.selection_saved, name))
+    }
+
+    private fun postExportStatus(message: String) {
+        mainHandler.post { statusText.text = message }
+    }
+
+    private fun writeExportToDownloads(text: String): String {
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val name = "wezterm-android-$stamp.txt"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("MediaStore rejected $name")
+            contentResolver.openOutputStream(uri)?.use { stream ->
+                stream.write(text.toByteArray(Charsets.UTF_8))
+            } ?: throw IllegalStateException("cannot open output stream for $name")
+        } else {
+            val downloads = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS,
+            )
+            if (!downloads.isDirectory && !downloads.mkdirs()) {
+                throw IllegalStateException("cannot create ${downloads.path}")
+            }
+            File(downloads, name).writeText(text, Charsets.UTF_8)
+        }
+        return name
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_VIEWPORT_SAVE_PERMISSION) return
+        pendingViewportSaveAfterPermission = false
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            saveTerminalViewport()
+        } else {
+            statusText.text = getString(R.string.selection_save_failed, getString(R.string.selection_save_permission))
+        }
+    }
+
     private fun updateViewportStatus(offset: Int) {
         val clampedOffset = offset.coerceAtLeast(0)
         val wasInHistory = lastViewportOffset > 0
@@ -1388,6 +1508,8 @@ class MainActivity : AppCompatActivity() {
         private const val ACTION_PASTE = 1_002
         private const val ACTION_SELECT_ALL = 1_003
         private const val ACTION_CANCEL = 1_004
+        private const val ACTION_SAVE = 1_005
+        private const val REQUEST_VIEWPORT_SAVE_PERMISSION = 1_101
         private const val DEBUG_IDENTITY_RELATIVE_PATH =
             "ssh/identities/wezterm_android_debug_ed25519"
     }

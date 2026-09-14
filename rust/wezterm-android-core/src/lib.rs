@@ -270,6 +270,52 @@ pub struct TerminalModel {
 }
 
 impl TerminalModel {
+    /// Export plain text from an absolute pinned viewport top through the
+    /// physical live cursor row, cropping that row at the cursor column.
+    /// `None` starts at the live viewport top. The anchor is clamped to
+    /// `0..=live_top`. Reads the authoritative screen lines, so scrollback
+    /// that was never rendered on Android is included; soft-wrapped rows are
+    /// joined.
+    pub fn text_from_viewport_top(&self, pinned_top: Option<isize>) -> String {
+        let size = self.terminal.get_size();
+        let screen = self.terminal.screen();
+        let cursor = self.terminal.cursor_pos();
+        let first_visible_row = screen.phys_row(0);
+        let live_top = isize::try_from(first_visible_row).unwrap_or(isize::MAX);
+        let start = match pinned_top {
+            Some(top) => usize::try_from(top.clamp(0, live_top)).unwrap_or(0),
+            None => first_visible_row,
+        };
+        let cursor_phys_row = screen.phys_row(cursor.y);
+        let end = cursor_phys_row.max(start);
+        let lines = screen.lines_in_phys_range(start..end.saturating_add(1));
+        let mut result = String::new();
+        for (index, line) in lines.iter().enumerate() {
+            if index + 1 == lines.len() {
+                let mut row_text = String::new();
+                let mut last_start: Option<usize> = None;
+                for cell in line.visible_cells() {
+                    let start_column = cell.cell_index();
+                    if start_column >= cursor.x || start_column >= size.cols {
+                        break;
+                    }
+                    if last_start == Some(start_column) {
+                        continue;
+                    }
+                    row_text.push_str(cell.str());
+                    last_start = Some(start_column);
+                }
+                result.push_str(row_text.trim_end_matches(' '));
+            } else {
+                result.push_str(line.as_str().trim_end_matches(' '));
+                if !line.last_cell_was_wrapped() {
+                    result.push('\n');
+                }
+            }
+        }
+        result
+    }
+
     pub fn new(
         columns: usize,
         rows: usize,
@@ -545,6 +591,28 @@ mod tests {
         assert_eq!(oldest.viewport_offset, oldest.max_viewport_offset);
         assert_ne!(bottom.cells, oldest.cells);
         assert_eq!(oldest.cursor_row, oldest.rows);
+    }
+
+    #[test]
+    fn exports_viewport_top_through_live_cursor() {
+        let mut model = model();
+        for index in 0..30 {
+            model.feed(format!("line-{index}\r\n"));
+        }
+        // The pinned anchor sits above the live viewport; the export must
+        // start there, pass through the whole scrollback, and stop at the
+        // live cursor row. A live-only read can never see rows above the
+        // current viewport.
+        let export = model.text_from_viewport_top(Some(5));
+        assert!(export.starts_with("line-5\n"));
+        assert!(export.contains("\nline-11\nline-12\n"));
+        assert!(model.text_from_viewport_top(Some(-100)).starts_with("line-0\n"));
+        let live = model.text_from_viewport_top(None);
+        assert!(!live.contains("line-5\n"));
+        // No stored snapshot is involved: feeding one more line must not
+        // move the pinned start row.
+        model.feed("line-30\r\n");
+        assert!(model.text_from_viewport_top(Some(5)).starts_with("line-5\n"));
     }
 
     #[test]

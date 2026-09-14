@@ -14,6 +14,13 @@
     <string name="selection_paste">粘贴</string>
     <string name="selection_select_all">全选当前屏</string>
     <string name="selection_cancel">取消</string>
+    <string name="selection_save">保存</string>
+    <string name="selection_save_description">把视口与实时输出保存到 Download 文件夹</string>
+    <string name="selection_saved">已保存到 Downloads/%1$s</string>
+    <string name="selection_save_pending">正在导出视口…</string>
+    <string name="selection_save_permission">需要存储权限才能保存到 Download 文件夹</string>
+    <string name="selection_save_unavailable">导出功能不可用</string>
+    <string name="selection_save_failed">保存失败：%1$s</string>
     <string name="selection_mode_active">选择模式 · 拖动可扩展选区</string>
     <string name="selection_empty">当前选区没有可复制文本</string>
     <string name="selection_clipboard_label">WezTerm 终端文本</string>

@@ -53,7 +53,7 @@ Termux:X11、proot 或 Linux 桌面环境。
 | 动态标签标题 | 已完成 | 随远端 pane/OSC 标题快照更新，变化检测后通知 UI |
 | 标签滚动与视口 | 已完成 | 每标签独立滚动位置；历史视口钉住绝对行，新输出不推移内容 |
 | 移动输入 | 已完成核心闭环 | 固定键盘 + 自动换行且按 MUX 标签隔离草稿的系统 IME 编辑框 |
-| 触摸与剪贴板 | 已完成核心闭环 | 单指远端滚轮、双指本地历史、长按选择、复制粘贴 |
+| 触摸与剪贴板 | 已完成核心闭环 | 单指远端滚轮、双指本地历史、长按选择、复制粘贴、导出视口到 Download |
 | 终端缩放 | 已完成 | 设置页滑条缩放单元格，网格预览；返回终端自动同步远端 resize |
 | Material 3 设置 | 已完成 | 动态色、深色模式、语言、终端缩放和开发者信息 |
 | 中英文界面 | 已完成 | English、简体中文、跟随系统 |
@@ -205,7 +205,12 @@ ID、pane ID、标题和活动状态；`wezterm-android-mux` 将其与上一次�
 - 单指上下拖动/fling：向远端 pane 发送滚轮事件，让 TUI 自己处理；
 - 双指上下拖动/fling：改变客户端 `viewport_offset`，浏览 WezTerm scrollback；
 - 长按：按词进入 cell 选择模式；拖动扩展选区；
-- Android `ActionMode`：复制、粘贴、选择当前可见屏和取消；
+- Android `ActionMode`：复制、粘贴、选择当前可见屏、保存和取消；
+- "保存"把当前视口顶部经 scrollback 到实时光标行的全部内容导出为 txt：
+  本地 SSH 路径在 UI 线程读 `TerminalModel`，SSHMUX 路径经绝对行号
+  `GetLines` RPC 从服务器水合未渲染过的行；文件写入 `Downloads/` 根目录
+  （API 29+ 走 MediaStore，旧版本走 `WRITE_EXTERNAL_STORAGE`），导出后选择
+  与菜单保持打开；
 - 双宽字符 continuation cell 会回映射到原 grapheme，软换行不会插入额外换行。
 
 ### 5.7 设置与本地化

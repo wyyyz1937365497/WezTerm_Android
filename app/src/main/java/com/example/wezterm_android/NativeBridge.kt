@@ -51,6 +51,22 @@ internal object NativeBridge {
     @JvmStatic
     external fun nativeSelectionText(): String?
 
+    /**
+     * UI thread only. Captures the current viewport anchor and either queues
+     * the SSHMUX export (returns `{"pending":true}`) or exports the local SSH
+     * terminal text inline (returns `{"ok":true,"text":...}`). Always returns
+     * a JSON envelope; `{"ok":false,"error":...}` carries the failure.
+     */
+    @JvmStatic
+    external fun nativeBeginViewportExport(): String?
+
+    /**
+     * Worker thread. Waits for the queued SSHMUX export and returns the same
+     * JSON envelope; null means nothing was queued.
+     */
+    @JvmStatic
+    external fun nativeViewportExportWait(): String?
+
     @JvmStatic
     external fun nativeKeyEvent(
         keyCode: Int,
