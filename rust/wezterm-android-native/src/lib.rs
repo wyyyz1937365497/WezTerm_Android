@@ -1697,6 +1697,18 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSurf
             error
         );
     }
+    if MUX_READY.load(Ordering::SeqCst) {
+        // The block above uploaded the local TERMINAL model, which during
+        // SSHMUX is a stale placeholder; the forced/normal remote resize
+        // usually keeps the pane size unchanged, so the next poll would
+        // diff-equal and keep that placeholder on screen. Drop the last mux
+        // snapshot and re-pump the real pane. The RENDERER borrow is already
+        // released here, so pump may take it again to render.
+        LAST_MUX_SNAPSHOT.with(|last| last.borrow_mut().take());
+        if let Err(error) = pump_mux_terminal() {
+            log::warn!("unable to restore SSHMUX terminal after Surface change: {error:#}");
+        }
+    }
     JNI_TRUE
 }
 
