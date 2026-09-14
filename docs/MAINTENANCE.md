@@ -292,6 +292,25 @@ Surface。
 
 **解决**：`onStart` 根据现存 SSH/MUX session 和标签快照重建本地状态文本与控件状态。
 
+
+### 4.10 SSHMUX 下 Surface 重建后画面被本地占位内容覆盖
+
+**现象**：SSHMUX 附着状态下，冷启动、前后台切换或设置往返后，终端偶尔显示空白或
+像素猫占位内容，远端真实画面要等下次输出才恢复。
+
+**根因**：Surface 重建流程会先用本地 `TERMINAL` 模型渲染一帧（MUX 会话下是陈旧
+占位），且占位快照的 `viewport_offset` 为 0：`observe_snapshot` 会把历史锚点
+`pinned_top` 清空，随后的 mux 快照 diff 判定无变化跳过重绘，占位帧滞留；浏览历史
+时还会把该标签已保存的滚动锚点覆盖回实时底部。
+
+**解决**：`nativeSurfaceCreated`、`nativeSurfaceChanged` 与强制缩放应用三条路径在
+MUX 就绪时使 `LAST_MUX_SNAPSHOT` 失效并 `pump_mux_terminal()` 重新拉取真实远端
+窗格；两条 Surface 回调不再用本地占位快照更新交互状态，滚动锚点由真实 mux 快照
+驱动；仅普通 SSH/无连接路径渲染本地快照。
+
+**回归点**：SSHMUX 附着状态下冷启动、前后台切换、缩放调节返回与浏览历史后进设置
+再返回，确认画面始终是远端内容、远端行列随缩放同步且滚动位置保持。
+
 ## 5. 验证方法
 
 ### 5.1 Android 构建、JVM 测试和 Lint

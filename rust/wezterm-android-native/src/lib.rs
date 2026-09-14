@@ -1618,7 +1618,14 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSurf
         RENDERER.with(|slot| {
             slot.borrow_mut().replace(renderer);
         });
-        VIEW_INTERACTION.with(|interaction| interaction.borrow_mut().observe_snapshot(&terminal));
+        if !MUX_READY.load(Ordering::SeqCst) {
+            // The local model is the SSH mirror or idle artwork. During
+            // SSHMUX the real pane snapshot drives interaction state;
+            // observing this placeholder would report offset zero and clear
+            // the history anchor right before the pump below restores it.
+            VIEW_INTERACTION
+                .with(|interaction| interaction.borrow_mut().observe_snapshot(&terminal));
+        }
         LAST_VIEW_SNAPSHOT.with(|last| {
             last.borrow_mut().replace(terminal.clone());
         });
@@ -1674,8 +1681,12 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSurf
             let terminal = terminal_snapshot_for_surface(width, height, renderer.density_dpi);
             let selection = VIEW_INTERACTION.with(|interaction| interaction.borrow().selection);
             renderer.resize(width, height, &terminal, selection)?;
-            VIEW_INTERACTION
-                .with(|interaction| interaction.borrow_mut().observe_snapshot(&terminal));
+            if !MUX_READY.load(Ordering::SeqCst) {
+                // See nativeSurfaceCreated: never let the local placeholder
+                // snapshot clear the SSHMUX history anchor.
+                VIEW_INTERACTION
+                    .with(|interaction| interaction.borrow_mut().observe_snapshot(&terminal));
+            }
             LAST_VIEW_SNAPSHOT.with(|last| {
                 last.borrow_mut().replace(terminal);
             });
