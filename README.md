@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.2.2`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.3`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -27,6 +27,7 @@ Android 发行版。
 - MesloLGS Nerd Font Mono + 内置 Noto Sans Math + Android Noto Sans CJK fallback；
 - 普通 SSH：host-key、认证、`xterm-256color` PTY、输入与 resize；
 - SSHMUX：持久远端标签、新建/切换/关闭、安全 Detach、自动重附着和活动标签恢复；
+- MUX 连接配置支持命名保存与下拉选择；预置 `乌邦图` 和 `Windows` 两套端点；
 - 动态标签标题，跟随远端 pane/OSC title 更新；
 - 每个远端标签独立记忆滚动位置，浏览历史时新输出不再推移视野；
 - 设置页终端缩放：滑条调节单元格大小并实时预览行列网格，返回终端自动 resize；
@@ -38,6 +39,13 @@ Android 发行版。
 - 前后台 Surface 重建、失效连接识别和指数退避恢复；
 - 纯黑终端、无连接像素猫、Material 3 深色界面；
 - 跟随系统、English、简体中文以及设置页开发者信息。
+
+## v0.2.3 更新
+
+- MUX 连接对话框新增可编辑的配置下拉框与"保存配置"按钮，选择后自动填充
+  主机、用户名、端口和远端 wezterm 路径；
+- 首次升级把真机原有端点迁移为 `Windows`，并加入本机 `乌邦图` 配置；profile
+  只保存连接参数，不保存密码或私钥。
 
 ## v0.2.2 更新
 
@@ -72,7 +80,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.2-arm64.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.3-arm64.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - release 构建变体 + cargo `--release` 原生库，使用 Android debug 密钥签名，并保留

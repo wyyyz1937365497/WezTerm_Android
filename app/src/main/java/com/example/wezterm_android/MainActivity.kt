@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
+import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -32,6 +33,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import org.json.JSONArray
@@ -46,6 +48,19 @@ import kotlin.math.max
 private data class DialogTextField(
     val container: TextInputLayout,
     val input: TextInputEditText,
+)
+
+private data class MuxProfileField(
+    val container: TextInputLayout,
+    val input: MaterialAutoCompleteTextView,
+)
+
+private data class MuxConnectionProfile(
+    val name: String,
+    val host: String,
+    val user: String,
+    val port: Int,
+    val remoteWeztermPath: String,
 )
 
 class MainActivity : AppCompatActivity() {
@@ -489,10 +504,36 @@ class MainActivity : AppCompatActivity() {
     private fun showConnectionDialog(useMux: Boolean) {
         val preferences = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
         val debugIdentity = debugIdentityFile()
-        val savedUser = preferences.getString(PREFERENCE_USER, "") ?: ""
+        val muxProfiles = if (useMux) loadMuxProfiles(preferences) else mutableListOf()
+        val selectedMuxProfile = if (useMux) {
+            val selectedName = preferences.getString(
+                PREFERENCE_MUX_SELECTED_PROFILE,
+                DEFAULT_WINDOWS_PROFILE_NAME,
+            )
+            muxProfiles.firstOrNull { it.name == selectedName } ?: muxProfiles.firstOrNull()
+        } else {
+            null
+        }
+        val savedUser = selectedMuxProfile?.user
+            ?: preferences.getString(PREFERENCE_USER, "").orEmpty()
+        val savedHost = selectedMuxProfile?.host
+            ?: preferences.getString(PREFERENCE_HOST, "").orEmpty()
+        val savedPort = selectedMuxProfile?.port
+            ?: preferences.getInt(PREFERENCE_PORT, 22)
+        val defaultRemoteWezterm = if (savedUser.isBlank()) {
+            "wezterm"
+        } else {
+            "/home/$savedUser/.local/bin/wezterm"
+        }
+        val savedRemoteWezterm = selectedMuxProfile?.remoteWeztermPath
+            ?: preferences.getString(PREFERENCE_REMOTE_WEZTERM, defaultRemoteWezterm)
+                .orEmpty()
+        val profileInput = selectedMuxProfile?.let { selected ->
+            muxProfileInput(muxProfiles.map(MuxConnectionProfile::name), selected.name)
+        }
         val hostInput = connectionInput(
             hint = getString(R.string.ssh_host),
-            value = preferences.getString(PREFERENCE_HOST, "") ?: "",
+            value = savedHost,
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
         )
         val userInput = connectionInput(
@@ -502,30 +543,50 @@ class MainActivity : AppCompatActivity() {
         )
         val portInput = connectionInput(
             hint = getString(R.string.ssh_port),
-            value = preferences.getInt(PREFERENCE_PORT, 22).toString(),
+            value = savedPort.toString(),
             inputType = InputType.TYPE_CLASS_NUMBER,
         )
-        val defaultRemoteWezterm = if (savedUser.isBlank()) {
-            "wezterm"
-        } else {
-            "/home/$savedUser/.local/bin/wezterm"
-        }
         val remoteWeztermInput = connectionInput(
             hint = getString(R.string.mux_remote_wezterm_path),
-            value = preferences.getString(PREFERENCE_REMOTE_WEZTERM, defaultRemoteWezterm)
-                ?: defaultRemoteWezterm,
+            value = savedRemoteWezterm,
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
         )
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
+            profileInput?.let { addView(it.container) }
             addView(hostInput.container)
             addView(userInput.container)
             addView(portInput.container)
             if (useMux) addView(remoteWeztermInput.container)
         }
 
-        val dialog = MaterialAlertDialogBuilder(this)
+        fun currentMuxProfile(): MuxConnectionProfile? {
+            val profileField = profileInput ?: return null
+            val name = profileField.input.text.toString().trim()
+            val host = hostInput.input.text.toString().trim()
+            val user = userInput.input.text.toString().trim()
+            val port = portInput.input.text.toString().toIntOrNull()
+            val remotePath = remoteWeztermInput.input.text.toString().trim()
+            profileField.container.error =
+                getString(R.string.mux_profile_required).takeIf { name.isBlank() }
+            hostInput.container.error =
+                getString(R.string.mux_profile_required).takeIf { host.isBlank() }
+            userInput.container.error =
+                getString(R.string.mux_profile_required).takeIf { user.isBlank() }
+            portInput.container.error =
+                getString(R.string.ssh_invalid_port).takeIf { port == null || port !in 1..65535 }
+            remoteWeztermInput.container.error =
+                getString(R.string.mux_profile_required).takeIf { remotePath.isBlank() }
+            if (name.isBlank() || host.isBlank() || user.isBlank() ||
+                port == null || port !in 1..65535 || remotePath.isBlank()
+            ) {
+                return null
+            }
+            return MuxConnectionProfile(name, host, user, port, remotePath)
+        }
+
+        val builder = MaterialAlertDialogBuilder(this)
             .setTitle(if (useMux) R.string.mux_connection_title else R.string.ssh_connection_title)
             .setMessage(
                 if (useMux) {
@@ -545,18 +606,60 @@ class MainActivity : AppCompatActivity() {
             .setView(content)
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(if (useMux) R.string.mux_attach else R.string.ssh_connect, null)
-            .create()
+        if (useMux) builder.setNeutralButton(R.string.mux_profile_save, null)
+        val dialog = builder.create()
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val port = portInput.input.text.toString().toIntOrNull()
+            profileInput?.input?.setOnItemClickListener { parent, _, position, _ ->
+                val selectedName = parent.getItemAtPosition(position).toString()
+                val profile = muxProfiles.firstOrNull { it.name == selectedName }
+                    ?: return@setOnItemClickListener
+                profileInput.input.setText(profile.name, false)
+                profileInput.container.error = null
+                profileInput.container.helperText = null
+                hostInput.input.setText(profile.host)
+                hostInput.container.error = null
+                userInput.input.setText(profile.user)
+                userInput.container.error = null
+                portInput.input.setText(profile.port.toString())
+                portInput.container.error = null
+                remoteWeztermInput.input.setText(profile.remoteWeztermPath)
+                remoteWeztermInput.container.error = null
+                preferences.edit()
+                    .putString(PREFERENCE_MUX_SELECTED_PROFILE, profile.name)
+                    .apply()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener saveClick@{
+                val profile = currentMuxProfile() ?: return@saveClick
+                val existing = muxProfiles.indexOfFirst { it.name == profile.name }
+                if (existing >= 0) {
+                    muxProfiles[existing] = profile
+                } else {
+                    muxProfiles.add(profile)
+                }
+                persistMuxProfiles(preferences, muxProfiles)
+                preferences.edit()
+                    .putString(PREFERENCE_MUX_SELECTED_PROFILE, profile.name)
+                    .apply()
+                profileInput?.input?.setSimpleItems(
+                    muxProfiles.map(MuxConnectionProfile::name).toTypedArray(),
+                )
+                profileInput?.input?.setText(profile.name, false)
+                profileInput?.container?.helperText =
+                    getString(R.string.mux_profile_saved, profile.name)
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener attachClick@{
+                val muxProfile = if (useMux) currentMuxProfile() else null
+                if (useMux && muxProfile == null) return@attachClick
+                val port = muxProfile?.port ?: portInput.input.text.toString().toIntOrNull()
                 if (port == null || port !in 1..65535) {
                     portInput.container.error = getString(R.string.ssh_invalid_port)
-                    return@setOnClickListener
+                    return@attachClick
                 }
                 portInput.container.error = null
-                val host = hostInput.input.text.toString().trim()
-                val user = userInput.input.text.toString().trim()
-                val remoteWeztermPath = remoteWeztermInput.input.text.toString().trim()
+                val host = muxProfile?.host ?: hostInput.input.text.toString().trim()
+                val user = muxProfile?.user ?: userInput.input.text.toString().trim()
+                val remoteWeztermPath = muxProfile?.remoteWeztermPath
+                    ?: remoteWeztermInput.input.text.toString().trim()
                 if (useMux) disableMuxAutoReconnect()
                 val error = if (useMux) {
                     NativeBridge.nativeMuxStart(
@@ -582,7 +685,7 @@ class MainActivity : AppCompatActivity() {
                         if (useMux) R.string.mux_start_failed else R.string.ssh_start_failed,
                         error,
                     )
-                    return@setOnClickListener
+                    return@attachClick
                 }
                 preferences.edit()
                     .putString(PREFERENCE_HOST, host)
@@ -632,6 +735,125 @@ class MainActivity : AppCompatActivity() {
             )
         }
         return DialogTextField(container, input)
+    }
+
+    private fun muxProfileInput(names: List<String>, selectedName: String): MuxProfileField {
+        val input = MaterialAutoCompleteTextView(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            threshold = 0
+            setSimpleItems(names.toTypedArray())
+            setText(selectedName, false)
+        }
+        val container = TextInputLayout(
+            this,
+            null,
+            com.google.android.material.R.attr.textInputOutlinedExposedDropdownMenuStyle,
+        ).apply {
+            hint = getString(R.string.mux_profile_name)
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            endIconMode = TextInputLayout.END_ICON_DROPDOWN_MENU
+            helperText = getString(R.string.mux_profile_hint)
+            setPadding(0, dp(4), 0, dp(4))
+            addView(
+                input,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        return MuxProfileField(container, input)
+    }
+
+    private fun loadMuxProfiles(
+        preferences: SharedPreferences,
+    ): MutableList<MuxConnectionProfile> {
+        val encoded = preferences.getString(PREFERENCE_MUX_PROFILES, null)
+        if (encoded != null) {
+            try {
+                val profiles = mutableListOf<MuxConnectionProfile>()
+                val array = JSONArray(encoded)
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val profile = MuxConnectionProfile(
+                        name = item.optString("name").trim(),
+                        host = item.optString("host").trim(),
+                        user = item.optString("user").trim(),
+                        port = item.optInt("port", -1),
+                        remoteWeztermPath = item.optString("remote_wezterm_path").trim(),
+                    )
+                    if (profile.name.isNotBlank() && profile.host.isNotBlank() &&
+                        profile.user.isNotBlank() && profile.port in 1..65535 &&
+                        profile.remoteWeztermPath.isNotBlank()
+                    ) {
+                        val duplicate = profiles.indexOfFirst { it.name == profile.name }
+                        if (duplicate >= 0) profiles[duplicate] = profile else profiles.add(profile)
+                    }
+                }
+                if (profiles.isNotEmpty()) return profiles
+            } catch (failure: Throwable) {
+                logProfileFailure("load", failure)
+            }
+        }
+        val currentHost = preferences.getString(PREFERENCE_HOST, DEFAULT_MUX_HOST)
+            .orEmpty()
+            .ifBlank { DEFAULT_MUX_HOST }
+        val currentUser = preferences.getString(PREFERENCE_USER, DEFAULT_MUX_USER)
+            .orEmpty()
+            .ifBlank { DEFAULT_MUX_USER }
+        val currentPort = preferences.getInt(PREFERENCE_PORT, DEFAULT_MUX_PORT)
+            .takeIf { it in 1..65535 }
+            ?: DEFAULT_MUX_PORT
+        val currentRemotePath =
+            preferences.getString(PREFERENCE_REMOTE_WEZTERM, DEFAULT_WINDOWS_WEZTERM_PATH)
+                .orEmpty()
+                .ifBlank { DEFAULT_WINDOWS_WEZTERM_PATH }
+        val profiles = mutableListOf(
+            MuxConnectionProfile(
+                name = DEFAULT_UBUNTU_PROFILE_NAME,
+                host = DEFAULT_MUX_HOST,
+                user = DEFAULT_MUX_USER,
+                port = DEFAULT_MUX_PORT,
+                remoteWeztermPath = DEFAULT_UBUNTU_WEZTERM_PATH,
+            ),
+            MuxConnectionProfile(
+                name = DEFAULT_WINDOWS_PROFILE_NAME,
+                host = currentHost,
+                user = currentUser,
+                port = currentPort,
+                remoteWeztermPath = currentRemotePath,
+            ),
+        )
+        persistMuxProfiles(preferences, profiles)
+        preferences.edit()
+            .putString(PREFERENCE_MUX_SELECTED_PROFILE, DEFAULT_WINDOWS_PROFILE_NAME)
+            .apply()
+        return profiles
+    }
+
+    private fun persistMuxProfiles(
+        preferences: SharedPreferences,
+        profiles: List<MuxConnectionProfile>,
+    ) {
+        val encoded = JSONArray()
+        profiles.forEach { profile ->
+            encoded.put(
+                JSONObject()
+                    .put("name", profile.name)
+                    .put("host", profile.host)
+                    .put("user", profile.user)
+                    .put("port", profile.port)
+                    .put("remote_wezterm_path", profile.remoteWeztermPath),
+            )
+        }
+        preferences.edit()
+            .putString(PREFERENCE_MUX_PROFILES, encoded.toString())
+            .apply()
+    }
+
+    private fun logProfileFailure(operation: String, failure: Throwable) {
+        android.util.Log.w("WezTermAndroid", "MUX profile $operation failed", failure)
     }
 
     private fun showDisconnectConfirmation() {
@@ -1499,6 +1721,15 @@ class MainActivity : AppCompatActivity() {
         private const val PREFERENCE_USER = "user"
         private const val PREFERENCE_PORT = "port"
         private const val PREFERENCE_REMOTE_WEZTERM = "remote_wezterm_path"
+        private const val PREFERENCE_MUX_PROFILES = "mux_profiles"
+        private const val PREFERENCE_MUX_SELECTED_PROFILE = "mux_selected_profile"
+        private const val DEFAULT_UBUNTU_PROFILE_NAME = "乌邦图"
+        private const val DEFAULT_WINDOWS_PROFILE_NAME = "Windows"
+        private const val DEFAULT_MUX_HOST = "10.126.126.10"
+        private const val DEFAULT_MUX_USER = "wyyyz"
+        private const val DEFAULT_MUX_PORT = 22
+        private const val DEFAULT_UBUNTU_WEZTERM_PATH = "/home/wyyyz/.local/bin/wezterm"
+        private const val DEFAULT_WINDOWS_WEZTERM_PATH = "/Users/wyyyz/wezterm-sshmux.cmd"
         private const val PREFERENCE_MUX_AUTO_REATTACH = "mux_auto_reattach"
         private const val PREFERENCE_MUX_REMOTE_TAB_ID = "mux_remote_tab_id"
         private const val SSH_COMPOSER_CONTEXT = "ssh"

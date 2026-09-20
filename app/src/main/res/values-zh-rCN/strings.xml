@@ -76,6 +76,11 @@
     <string name="mux_connection_boundary">此模式要求使用密钥认证，并且远端安装兼容版本的 WezTerm；它不会启动本地 Shell 或本地 MUX 服务。</string>
     <string name="mux_connection_boundary_debug_identity">将使用应用私有的调试密钥附加兼容的远程 WezTerm MUX；安全分离会保留远程标签页。</string>
     <string name="mux_remote_wezterm_path">远程 wezterm 的绝对路径</string>
+    <string name="mux_profile_name">MUX 配置</string>
+    <string name="mux_profile_hint">选择已保存配置或输入新名称</string>
+    <string name="mux_profile_save">保存配置</string>
+    <string name="mux_profile_saved">已保存配置 %1$s</string>
+    <string name="mux_profile_required">必填</string>
     <string name="mux_start_failed">SSHMUX 启动失败：%1$s</string>
     <string name="mux_connecting">正在附加 SSHMUX 到 %1$s@%2$s:%3$d…</string>
     <string name="mux_negotiating">SSHMUX · 正在认证并协商编解码协议…</string>

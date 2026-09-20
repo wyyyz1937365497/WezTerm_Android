@@ -179,6 +179,11 @@ ID、pane ID、标题和活动状态；`wezterm-android-mux` 将其与上一次�
 内容变化时才发出 `TabsChanged`。因此 OSC/pane 标题能够动态更新，而 100 ms UI poll
 不会重复发送相同列表。
 
+MUX 连接参数按命名 profile 保存在应用 `SharedPreferences` 的 JSON 数组中，只包含
+profile 名称、host、user、port 和远端 wezterm 路径，不包含密码或私钥。连接对话框
+使用可编辑下拉框切换 profile，选择后一次填充四项连接参数；"保存配置"按名称新增或
+覆盖。首次迁移保留原端点为 `Windows`，并预置本机 `乌邦图` 端点。
+
 每个标签快照同时暴露稳定的远端 tab ID。Activity 保存最后活动的远端 ID；Surface
 重建或失效连接自动重附着时，Rust runtime 在首个快照前重新聚焦该 ID，而不是依赖
 可能变化的本地列表下标。

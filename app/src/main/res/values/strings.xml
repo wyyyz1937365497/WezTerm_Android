@@ -80,6 +80,11 @@
     <string name="mux_connection_boundary">This mode requires key authentication and a compatible WezTerm on the remote host. It does not start a local shell or local mux server.</string>
     <string name="mux_connection_boundary_debug_identity">The app-private debug identity will be used to attach a compatible remote WezTerm mux. Detaching preserves remote tabs.</string>
     <string name="mux_remote_wezterm_path">Absolute remote wezterm path</string>
+    <string name="mux_profile_name">Saved MUX configuration</string>
+    <string name="mux_profile_hint">Select a saved profile or type a new name</string>
+    <string name="mux_profile_save">Save config</string>
+    <string name="mux_profile_saved">Saved profile %1$s</string>
+    <string name="mux_profile_required">Required</string>
     <string name="mux_start_failed">SSHMUX start failed: %1$s</string>
     <string name="mux_connecting">Attaching SSHMUX to %1$s@%2$s:%3$d…</string>
     <string name="mux_negotiating">SSHMUX · authenticating and negotiating codec…</string>
