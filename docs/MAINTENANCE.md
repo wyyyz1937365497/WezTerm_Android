@@ -413,6 +413,17 @@ adb logcat -s WezTermAndroid
 
 - 当前语义是“进程存活时保持连接，进程被结束后回前台自动重附着”，不是前台服务式
   无限后台保活；
+- SSHMUX attach 存在两类互相独立的挂起，签名特征不同：
+  1. **HostVerify 死锁**：`wezterm-ssh-android` 的 `host_verification_libssh` 在
+     known_hosts 未命中时发 `SessionEvent::HostVerify` 后 `block_on` 等用户回复，
+     普通 SSH 桥接到信任对话框，MUX 路径无消费者 → 永久停在“认证并协商”；
+     服务器侧 auth.log 只见 preauth 即关闭。解法：把服务器 host key 预置进应用
+     `files/ssh/known_hosts`（`ssh-keyscan -t ed25519 <host>` 生成标准行，经
+     `run-as dd` 写入；注意旧 macOS 主机残留行会导致 Changed 硬失败）。长期修复
+     应像普通 SSH 一样把 mux 的 HostVerify 桥接到 UI；
+  2. **同进程重附着挂起**：进程内 attach→detach→再 attach 会停在 runtime 初始
+     化附近（4.4 节问题的变体），签名是公钥认证已被服务器接受后的静默挂起；
+     冷启动规避，根治需梳理 runtime 拆卸路径的 scheduler 生命周期；
 - Wi-Fi/蜂窝切换、Doze 和长时间后台仍需压力测试；
 - 横竖屏切换、分屏、折叠屏与各种系统 IME Insets 需要更多设备回归；
 - 16 KB 页仅完成 ELF/APK 静态对齐检查，尚无 16 KB 页真机运行证据；

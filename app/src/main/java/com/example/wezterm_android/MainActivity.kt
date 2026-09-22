@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private var muxAutoReconnectStarting = false
     private var lastViewportOffset = 0
     private var pendingViewportSaveAfterPermission = false
+    private var portraitActionBar: LinearLayout? = null
 
     private val retryMuxConnection = Runnable {
         muxReconnectScheduled = false
@@ -396,11 +397,61 @@ class MainActivity : AppCompatActivity() {
             statusBar.addView(button)
         }
         if (twoLineStatusBar) {
-            // The status line becomes its own full-width row below the
-            // buttons; without the tall weighted child the CENTER_VERTICAL
-            // button row stays pinned to the top instead of drifting to
-            // mid-screen.
+            // Portrait: the connection row stays on top; tab controls and
+            // the history button move to a second row (hidden until MUX
+            // attaches or history browsing starts), and every button shrinks
+            // so four of them fit one row with room for the labels.
             statusBar.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            val actionBar = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                setPadding(dp(8), dp(0), dp(4), dp(0))
+                visibility = View.GONE
+            }
+            listOf(
+                historyBottomButton,
+                muxPreviousButton,
+                muxNewButton,
+                muxCloseButton,
+                muxNextButton,
+            ).forEach { button ->
+                statusBar.removeView(button)
+                actionBar.addView(button)
+            }
+            portraitActionBar = actionBar
+            listOf(
+                statusText,
+                sshButton,
+                muxButton,
+                keyboardButton,
+                settingsButton,
+                historyBottomButton,
+                muxPreviousButton,
+                muxNewButton,
+                muxCloseButton,
+                muxNextButton,
+            ).forEach { view ->
+                if (view is Button) {
+                    view.textSize = 8f
+                    view.includeFontPadding = false
+                    view.setPadding(dp(4), dp(0), dp(4), dp(0))
+                    // Hard-pin sizes: the Material3 buttonStyle pulls
+                    // buttons to 88dp/40dp via style minWidth/minHeight and
+                    // measured text padding, which reads as huge tiles on a
+                    // 370dp-wide portrait row.
+                    val widthDp = when (view) {
+                        sshButton, muxButton -> 76
+                        historyBottomButton -> 56
+                        else -> 44
+                    }
+                    view.layoutParams = LinearLayout.LayoutParams(
+                        dp(widthDp),
+                        dp(26),
+                    ).apply {
+                        setMargins(dp(3), dp(1), dp(3), dp(1))
+                    }
+                }
+            }
             contentColumn.addView(
                 statusBar,
                 0,
@@ -410,8 +461,16 @@ class MainActivity : AppCompatActivity() {
                 ),
             )
             contentColumn.addView(
-                statusText,
+                actionBar,
                 1,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            contentColumn.addView(
+                statusText,
+                2,
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1685,6 +1744,14 @@ class MainActivity : AppCompatActivity() {
             muxNewButton,
             muxCloseButton,
         ).forEach { button -> button.alpha = if (button.isEnabled) 1f else 0.45f }
+        // Portrait keeps tab controls and the history button on their own
+        // row: show it only when either group has something to offer.
+        portraitActionBar?.visibility =
+            if (muxReady || historyBottomButton.visibility == View.VISIBLE) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
     }
 
     private fun updateTerminalInputState(showWhenReady: Boolean = false) {
