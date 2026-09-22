@@ -297,13 +297,26 @@ internal class TerminalKeyboardView(context: Context) : LinearLayout(context) {
             }
         }
 
+        // Portrait: keep every key at its fixed width and let the
+        // HorizontalScrollView scroll; a weighted main area would be squeezed
+        // to a sliver and clip the keys instead. Landscape keeps the weighted
+        // squeeze that fits all keys without scrolling.
+        val portraitKeys = context.resources.configuration.screenWidthDp < 600
         val body = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.TOP
             minimumWidth = dp(KEYBOARD_CONTENT_MIN_WIDTH_DP)
             addView(
                 mainKeys,
-                LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                LayoutParams(
+                    if (portraitKeys) {
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    } else {
+                        0
+                    },
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    if (portraitKeys) 0f else 1f,
+                ),
             )
             addView(
                 specialKeys,

@@ -256,10 +256,20 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(2), dp(4), dp(2))
         }
+        // Portrait phones are too narrow for one status line: the weighted
+        // status TextView would be squeezed to one glyph per line and its
+        // wrap-content height pushes the button row to mid-screen (the row
+        // is CENTER_VERTICAL). Landscape keeps the proven single row.
+        val twoLineStatusBar = resources.configuration.screenWidthDp < 600
         statusText = TextView(this).apply {
             text = getString(R.string.renderer_starting)
             setTextColor(Color.WHITE)
             textSize = 12f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            if (twoLineStatusBar) {
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+            }
         }
         sshButton = Button(this).apply {
             text = getString(R.string.ssh_connect)
@@ -342,10 +352,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         statusBar.addView(
-            statusText,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        statusBar.addView(
             historyBottomButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -389,14 +395,42 @@ class MainActivity : AppCompatActivity() {
             button.visibility = View.GONE
             statusBar.addView(button)
         }
-        contentColumn.addView(
-            statusBar,
-            0,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
+        if (twoLineStatusBar) {
+            // The status line becomes its own full-width row below the
+            // buttons; without the tall weighted child the CENTER_VERTICAL
+            // button row stays pinned to the top instead of drifting to
+            // mid-screen.
+            statusBar.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            contentColumn.addView(
+                statusBar,
+                0,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            contentColumn.addView(
+                statusText,
+                1,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        } else {
+            statusBar.addView(
+                statusText,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            contentColumn.addView(
+                statusBar,
+                0,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
 
         contentColumn.addView(
             terminalKeyboard,
