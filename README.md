@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.2.3`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.4`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -39,6 +39,17 @@ Android 发行版。
 - 前后台 Surface 重建、失效连接识别和指数退避恢复；
 - 纯黑终端、无连接像素猫、Material 3 深色界面；
 - 跟随系统、English、简体中文以及设置页开发者信息。
+
+## v0.2.4 更新
+
+- 竖屏手机适配：状态栏改两排紧凑布局（连接管理 + 标签/滚动操作），按钮尺寸与
+  间距硬编码收紧，绕开 Material3 按钮主题的 88dp/40dp 隐式最小尺寸；状态文字
+  独占一行单行省略，不再竖排、按钮行不再漂移到屏幕中部；
+- 竖屏键盘保持固定键宽并横向滚动，主键区不再被压缩；横屏布局保持不变；
+- 真机证据：[竖屏两排工具栏](artifacts/app-screenshots/v0.2.4-portrait-two-row-toolbar.png)、
+  [平板横屏回归](artifacts/app-screenshots/v0.2.4-landscape-tablet-regression.png)；
+- 维护文档补充 SSHMUX attach 两类挂起（HostVerify 死锁、同进程重附着挂起）的
+  签名特征与 known_hosts 预置解法。
 
 ## v0.2.3 更新
 
@@ -80,7 +91,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.3-arm64.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.4-arm64.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - release 构建变体 + cargo `--release` 原生库，使用 Android debug 密钥签名，并保留
