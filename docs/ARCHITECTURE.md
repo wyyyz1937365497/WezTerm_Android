@@ -1,8 +1,8 @@
 # WezTerm Android 架构与目标
 
-最后更新：2026-09-14
+最后更新：2026-09-29
 
-首个公开版本：`v0.1.0`；当前发布版本：`v0.2.1`
+首个公开版本：`v0.1.0`；当前发布版本：`v0.2.4`
 
 WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 
@@ -25,6 +25,8 @@ Termux:X11、proot 或 Linux 桌面环境。
 - 提供普通 SSH 与持久化 SSHMUX 两种远程客户端模式；
 - 支持硬件键盘、固定底部应用键盘、中文等系统 IME 文本输入；
 - 提供标签切换、新建、关闭、安全分离、动态标题和自动重附着；
+- 在终端网格内渲染内联图像（iTerm2 OSC 1337、sixel、kitty 图形）并推进 GIF/APNG
+  动画；
 - 在移动端提供适合 TUI 的触摸滚动、历史浏览与文本选择；
 - 保持终端模型、网络会话、Android Surface 三者生命周期相互独立；
 - 默认纯黑终端背景，使用 Material 3 承载设置与对话框；
@@ -48,6 +50,7 @@ Termux:X11、proot 或 Linux 桌面环境。
 | Android 原生 Surface + wgpu/Vulkan | 已完成 | Android 15 / Mali-G615 MC6 真机通过 |
 | WezTerm terminal cell 模型 | 已完成 | ANSI、TrueColor、宽字符、组合字符与 scrollback 有测试 |
 | 字体与 glyph atlas | 已完成核心闭环 | Meslo Nerd Font + Noto Math + Noto CJK；复杂 cluster、彩色 emoji 待完善 |
+| 内联终端图像 | 已完成核心闭环 | iTerm2 OSC 1337/kitty/sixel 快照进入同一渲染管线；OPD2407 SSHMUX imgcat PNG 真机验证；sixel/kitty/普通 SSH 尚无真机证据 |
 | 普通 SSH | 已完成 | host-key、密码/交互认证、私有密钥、PTY 与 resize |
 | SSHMUX | 已完成核心闭环 | attach、输入、标签控制、安全分离、自动重附着和活动标签恢复 |
 | 动态标签标题 | 已完成 | 随远端 pane/OSC 标题快照更新，变化检测后通知 UI |
@@ -59,7 +62,7 @@ Termux:X11、proot 或 Linux 桌面环境。
 | 中英文界面 | 已完成 | English、简体中文、跟随系统 |
 | 后台恢复 | 已完成工程闭环 | 进程存活保持；失效连接或冷启动自动重附着 |
 | 16 KB 页兼容 | 仅静态验证 | ELF/APK 对齐通过，尚无 16 KB 页真机运行证据 |
-| 正式发布签名 | 未完成 | 当前 `v0.2.1` GitHub Release 仍使用 debug 签名 |
+| 正式发布签名 | 未完成 | 当前 `v0.2.4` GitHub Release 仍使用 debug 签名 |
 
 “已完成”只表示表中限定的功能和验证环境通过，不等价于完整桌面 WezTerm、所有
 Android 设备或长期网络压力测试已经完成。
@@ -68,7 +71,7 @@ Android 设备或长期网络压力测试已经完成。
 
 ```text
 MainActivity（唯一终端窗口）             SettingsActivity
-  ├─ 单排状态栏：状态 / MUX 标签控制 / SSH / MUX / 键盘 / 设置        ├─ Material 3
+  ├─ 状态栏：竖屏两排（连接管理 + 标签/滚动操作），横屏单排          ├─ Material 3
   ├─ TerminalSurfaceView                                        ├─ 应用语言
   ├─ TerminalKeyboardView                                       ├─ 终端缩放
   ├─ WindowInsets / Clipboard / ActionMode                      └─ 开发者与版本信息
@@ -126,11 +129,44 @@ SurfaceView.surfaceCreated
 
 `TerminalSnapshot` 是渲染边界。网络和终端模型只产生不可变 cell 快照，GPU 代码不
 直接持有 WezTerm screen 锁。每个 cell 保存 grapheme、列位置、宽度、前景/背景色、
-强度、下划线、斜体、删除线和不可见属性。
+强度、下划线、斜体、删除线、不可见属性和图像切片。
 
 终端默认背景由 terminal palette 和 renderer 同时固定为纯黑色。没有连接时，
 `idle_cat_ansi` 通过同一个 WezTerm terminal/字体/renderer 通路显示居中的像素猫，
 不是独立 Android 图片覆盖层。
+
+**内联图像与动画**：iTerm2 OSC 1337（imgcat）与 sixel 由固定 revision 的
+`wezterm-term` 直接解析；kitty `_G` 图形需要 `AndroidTerminalConfiguration` 显式
+开启 `enable_kitty_graphics`（上游默认静默丢弃该载荷）。三种来源统一成为挂在 cell
+上的 `ImageCell` 切片，快照按 z 序保留在 `CellSnapshot.images` 中（携带 z-index、
+padding 与纹理坐标）；携带切片的空白格和双宽 continuation 格在快照过滤中存活，
+continuation 条目为空文本、宽度 1。
+
+```text
+CellSnapshot.cells[].images（ImageCell 切片）
+  → ImageData 解析：Rgba8 直读 / AnimRgba8 按动画帧取用
+    / EncodedFile·EncodedLease → decode（PNG/APNG/GIF/WebP；未知格式不绘制）
+  → 2048 × 2048 RGBA image atlas（上限 16 MiB，1 texel 采样 gutter，
+    64 px 行粒度对齐 wgpu 256 字节 bytes_per_row）
+  → 独立 image pipeline 与字形通道合成后 present
+```
+
+图像缓存是 CPU 账本加 GPU 纹理的 shelf packer：条目按 (图像 hash, 动画帧) 键控，
+当前帧未引用的条目按 LRU 逐出；极端压力下整体清空并在下一帧整批重传，缓存占用
+因此永远以 16 MiB 图集为上限。放不下的超大图按 2 的幂做预乘 alpha 降采样直到能
+放入；单次 prepare 最多提交 16,384 个切片实例，图集写满时放不下的切片跳过并按
+退避间隔记录 `image atlas exhausted` 警告（`adb logcat -s WezTermAndroid` 可见）。
+
+SSHMUX 图像经 mux 图像 PDU 反序列化为 blob 租约：首次附着时初始化并注册进程级
+`SimpleTempDir` 存储（应用私有 `files/image-blob-leases`），跨 detach/重附着保留，
+已渲染快照引用的租约不会失效；渲染时 `EncodedLease` 取回字节后与 `EncodedFile`
+走同一 decode。GIF/APNG 帧按墙钟选择，单帧下限 20 ms；当 UI poll 没有新输出或
+快照无变化且下一帧已到期时，用当前快照重跑 prepare+render，动画因此在 100 ms
+poll 节拍上推进。
+
+真机证据边界：OPD2407（Android 15）经 SSHMUX `wezterm imgcat` 发送的左红右蓝
+PNG 已直接渲染在终端网格中（修复前该区域空白）；sixel、kitty、普通 SSH 图像路径
+与 GIF/APNG 动画推进尚无真机证据，不声明设备验证完成。
 
 ### 5.2 字体
 
@@ -253,8 +289,10 @@ transport 警告，不能把一个已成功创建的 GPU Surface 标记为失败
 - 输入日志只允许记录长度，不记录用户输入内容；
 - 默认禁用系统 SSH agent 和任意用户目录 identity 扫描；
 - debug 免密脚本只向 debug 应用私有目录 provision 独立 Ed25519 私钥；
+- SSHMUX 图像 blob 租约只写入应用私有 `files/image-blob-leases`，不进入 Git、
+  Release 或同步备份路径；
 - 私钥、SDK 路径和构建机状态不得进入 Git 或 Release；
-- 当前 `v0.1.1` APK 为 debug 签名版本，不作为正式密钥分发方案；
+- 当前 `v0.2.4` APK 为 debug 签名版本，不作为正式密钥分发方案；
 - 后续正式版本应使用 Android Keystore、文件选择器和独立 release signing。
 
 ## 8. 平台基线
@@ -268,7 +306,7 @@ transport 警告，不能把一个已成功创建的 GPU Surface 标记为失败
 | 已验证设备 | OPD2407 / OP615AL1 |
 | 已验证系统 | Android 15 / API 35 |
 | 已验证 GPU | Mali-G615 MC6 / Vulkan |
-| 已验证方向 | 横屏 2800 × 2000 |
+| 已验证方向 | 横屏 2800 × 2000；竖屏 2000 × 2800 |
 
 ELF `LOAD` 段和 APK native entry 已通过 16 KB 静态对齐检查，但测试设备运行时页大小
 为 4 KB；在 16 KB 页设备或模拟器上运行成功之前，不声明 16 KB 运行验证完成。

@@ -6,10 +6,12 @@ members = [
     "wezterm-android-native",
     "wezterm-android-ssh",
 ]
+exclude = ["vendor/wezterm-client-android"]
 resolver = "2"
 
 [patch."https://github.com/wezterm/wezterm.git"]
 wezterm-ssh = { path = "vendor/wezterm-ssh-android" }
+wezterm-client = { path = "vendor/wezterm-client-android" }
 
 [patch.crates-io]
 dirs-next = { path = "vendor/dirs-next-android" }

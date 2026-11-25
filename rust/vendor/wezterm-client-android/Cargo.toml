@@ -1,0 +1,38 @@
+[package]
+name = "wezterm-client"
+version = "0.1.0"
+authors = ["Wez Furlong <wez@wezfurlong.org>"]
+edition = "2018"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+async-io = "2.0"
+async-trait = "0.1"
+async_ossl = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+codec = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+config = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+futures = "0.3"
+lazy_static = "1.4"
+libc = "0.2"
+log = "0.4"
+lru = "0.16"
+metrics = "0.23"
+mux = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+openssl = "0.10"
+parking_lot = "0.12"
+portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b", features = ["serde_support"] }
+promise = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+rangeset = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+ratelim = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+smol = "2.0"
+termwiz = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+textwrap = "0.16"
+thiserror = "1.0"
+umask = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+url = "2"
+wezterm-dynamic = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+wezterm-ssh = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }
+wezterm-term = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b", features = ["use_serde"] }
+wezterm-uds = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b" }

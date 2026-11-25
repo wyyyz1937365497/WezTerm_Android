@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use termwiz::surface::SEQ_ZERO;
-use wezterm_android_core::{CellSnapshot, CellStyleSnapshot, TerminalSnapshot};
+use wezterm_android_core::{snapshot_row_cells, CellStyleSnapshot, TerminalSnapshot};
 use wezterm_android_ssh::{AndroidSshConfig, SshEndpoint};
 use wezterm_client::domain::{ClientDomain, ClientDomainConfig};
 use wezterm_client::pane::ClientPane;
@@ -669,12 +669,15 @@ impl RuntimeState {
             .filter(|pane| pane.domain_id() == self.domain.domain_id())
     }
 
-    fn focus_active_pane(&self) -> anyhow::Result<()> {
+    fn focus_active_pane(&mut self) -> anyhow::Result<()> {
         let pane = self
             .active_pane()
             .ok_or_else(|| anyhow!("no active remote pane"))?;
         self.mux.focus_pane_and_containing_tab(pane.pane_id())?;
-        pane.resize(self.size)?;
+        // A newly spawned ClientPane caches the requested size locally, while
+        // the server may have inherited the old active tab's size. Its local
+        // resize can therefore be a no-op; send the authoritative RPC too.
+        self.resize_active()?;
         pane.advise_focus();
         Ok(())
     }
@@ -848,7 +851,7 @@ impl RuntimeState {
         let range = viewport.top..viewport.top + viewport.rows as isize;
         // This call drives ClientRenderable's adaptive remote poll.
         let _ = pane.get_changed_since(range.clone(), SEQ_ZERO);
-        let (first_row, lines) = pane.get_lines(range);
+        let (first_row, mut lines) = pane.get_lines(range);
         let viewport_offset = usize::try_from(viewport.live_top.saturating_sub(viewport.top))
             .unwrap_or(0)
             .min(viewport.max_offset);
@@ -862,24 +865,8 @@ impl RuntimeState {
             .map(|line| line.last_cell_was_wrapped())
             .collect();
         wrapped_rows.resize(viewport.rows, false);
-        for (row, line) in lines.iter().enumerate() {
-            for cell in line.visible_cells() {
-                if cell.cell_index() >= columns {
-                    continue;
-                }
-                let text = cell.str();
-                let style = snapshot_attributes(cell.attrs(), &palette);
-                if text.trim().is_empty() && style == default_style {
-                    continue;
-                }
-                cells.push(CellSnapshot {
-                    row,
-                    column: cell.cell_index(),
-                    text: text.to_owned(),
-                    width: cell.width(),
-                    style,
-                });
-            }
+        for (row, line) in lines.iter_mut().enumerate() {
+            snapshot_row_cells(line, row, columns, &palette, default_style, &mut cells);
         }
         let cursor_row = if cursor.y >= first_row && cursor.y < first_row + viewport.rows as isize {
             usize::try_from(cursor.y - first_row).unwrap_or(viewport.rows)

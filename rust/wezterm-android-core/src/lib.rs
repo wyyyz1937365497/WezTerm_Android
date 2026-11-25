@@ -1,7 +1,10 @@
 use std::fmt::Write;
 use std::sync::Arc;
 use wezterm_term::color::{ColorAttribute, ColorPalette, SrgbaTuple};
-use wezterm_term::{CellAttributes, Intensity, Terminal, TerminalConfiguration, TerminalSize};
+use wezterm_term::image::ImageCell;
+use wezterm_term::{
+    CellAttributes, Intensity, Line, Terminal, TerminalConfiguration, TerminalSize,
+};
 
 pub const UPSTREAM_WEZTERM_REVISION: &str = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b";
 
@@ -112,6 +115,13 @@ impl TerminalConfiguration for AndroidTerminalConfiguration {
     fn color_palette(&self) -> ColorPalette {
         android_palette()
     }
+
+    // Without this the terminal parser silently drops kitty `_G` graphics
+    // payloads, so remote kitty icat/GUI-image placements never reach the
+    // per-cell ImageCell slices exposed by the snapshot.
+    fn enable_kitty_graphics(&self) -> bool {
+        true
+    }
 }
 
 fn android_palette() -> ColorPalette {
@@ -128,6 +138,11 @@ pub struct CellSnapshot {
     pub text: String,
     pub width: usize,
     pub style: CellStyleSnapshot,
+    /// Image slices attached to this cell in z-index order (kitty graphics,
+    /// iTerm2 OSC 1337, sixel). Empty for pure text cells. Blank cells and
+    /// wide-cell continuation columns that carry slices survive snapshot
+    /// filtering; continuation entries carry empty `text` and `width` 1.
+    pub images: Vec<ImageCell>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,7 +390,7 @@ impl TerminalModel {
             None => first_visible_row,
         };
         let viewport_offset = first_visible_row.saturating_sub(first_view_row);
-        let lines = screen.lines_in_phys_range(first_view_row..first_view_row + size.rows);
+        let mut lines = screen.lines_in_phys_range(first_view_row..first_view_row + size.rows);
         let mut cells = Vec::new();
         let palette = android_palette();
         let default_style = snapshot_attributes(&CellAttributes::blank(), &palette);
@@ -384,24 +399,8 @@ impl TerminalModel {
             .map(|line| line.last_cell_was_wrapped())
             .collect();
 
-        for (row, line) in lines.iter().enumerate() {
-            for cell in line.visible_cells() {
-                let text = cell.str();
-                if cell.cell_index() >= size.cols {
-                    continue;
-                }
-                let style = snapshot_attributes(cell.attrs(), &palette);
-                if text.trim().is_empty() && style == default_style {
-                    continue;
-                }
-                cells.push(CellSnapshot {
-                    row,
-                    column: cell.cell_index(),
-                    text: text.to_owned(),
-                    width: cell.width(),
-                    style,
-                });
-            }
+        for (row, line) in lines.iter_mut().enumerate() {
+            snapshot_row_cells(line, row, size.cols, &palette, default_style, &mut cells);
         }
 
         TerminalSnapshot {
@@ -455,6 +454,63 @@ fn color_to_rgba(color: SrgbaTuple) -> [u8; 4] {
     [red, green, blue, alpha]
 }
 
+/// Snapshot the cells of one physical row, appending to `cells` in ascending
+/// column order. Blank default-styled cells stay omitted for text rendering,
+/// but any cell carrying attached image slices (kitty graphics, iTerm2
+/// OSC 1337, sixel) is retained so placements survive snapshotting. Wide-cell
+/// continuation columns, which `Line::visible_cells` skips, are emitted as
+/// image-only cells (empty text, width 1) when they carry slices. Every slice
+/// keeps its original z-index, padding, and texture coordinates exactly once.
+pub fn snapshot_row_cells(
+    line: &mut Line,
+    row: usize,
+    columns: usize,
+    palette: &ColorPalette,
+    default_style: CellStyleSnapshot,
+    cells: &mut Vec<CellSnapshot>,
+) {
+    // Raw physical-cell access is required: `visible_cells` yields neither
+    // the continuation columns nor the image slices attached to them, and
+    // image placements attach one slice per covered physical cell.
+    let storage = line.cells_mut();
+    let mut column = 0;
+    while column < columns {
+        let Some(cell) = storage.get(column) else {
+            break;
+        };
+        let width = cell.width().max(1);
+        let text = cell.str();
+        let style = snapshot_attributes(cell.attrs(), palette);
+        let images = cell.attrs().images().unwrap_or_default();
+        if !images.is_empty() || !text.trim().is_empty() || style != default_style {
+            cells.push(CellSnapshot {
+                row,
+                column,
+                text: text.to_owned(),
+                width: cell.width(),
+                style,
+                images,
+            });
+        }
+        for continuation in column + 1..(column + width).min(columns) {
+            let Some(cell) = storage.get(continuation) else {
+                break;
+            };
+            if let Some(images) = cell.attrs().images() {
+                cells.push(CellSnapshot {
+                    row,
+                    column: continuation,
+                    text: String::new(),
+                    width: 1,
+                    style: snapshot_attributes(cell.attrs(), palette),
+                    images,
+                });
+            }
+        }
+        column += width;
+    }
+}
+
 fn terminal_size(
     columns: usize,
     rows: usize,
@@ -474,6 +530,8 @@ fn terminal_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wezterm_term::image::{ImageData, TextureCoordinate};
+    use wezterm_term::Cell;
 
     fn model() -> TerminalModel {
         TerminalModel::new(12, 4, 120, 80, 160)
@@ -683,5 +741,160 @@ mod tests {
         for (offset, expected) in expected.into_iter().enumerate() {
             assert_eq!(android_key_bytes(131 + offset as i32, 0, 0), expected);
         }
+    }
+
+    /// Minimal valid 1x1 RGBA PNG used to drive real image placements.
+    const PROBE_PNG_BASE64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn retains_iterm2_image_slice_on_a_blank_cell() {
+        let mut model = TerminalModel::new(20, 6, 200, 120, 320);
+        model.feed(b"\x1b[2J\x1b[H");
+        model.feed(format!(
+            "\x1b]1337;File=inline=1;size=70:{}\x07",
+            PROBE_PNG_BASE64
+        ));
+
+        let snapshot = model.snapshot();
+        let imaged: Vec<&CellSnapshot> = snapshot
+            .cells
+            .iter()
+            .filter(|cell| !cell.images.is_empty())
+            .collect();
+        assert_eq!(imaged.len(), 1);
+        let cell = imaged[0];
+        assert_eq!((cell.row, cell.column), (0, 0));
+        // The covered cell is blank and default-styled, which the snapshot
+        // normally filters; the attached placement slice must keep it.
+        assert_eq!(cell.text, " ");
+        assert_eq!(
+            cell.style,
+            snapshot_attributes(&CellAttributes::blank(), &android_palette())
+        );
+        assert_eq!(cell.images.len(), 1);
+        let image = &cell.images[0];
+        assert_eq!(image.z_index(), 0);
+        // The 1px source only fills part of the 10x20px cell; the remainder
+        // padding must reach the renderer untouched.
+        assert_eq!(image.padding(), (0, 0, 9, 19));
+        assert_eq!(image.top_left(), TextureCoordinate::new_f32(0.0, 0.0));
+        assert_eq!(image.bottom_right(), TextureCoordinate::new_f32(1.0, 1.0));
+        assert_eq!(image.image_data().data().dimensions().ok(), Some((1, 1)));
+    }
+
+    #[test]
+    fn retains_kitty_image_slice_when_graphics_are_enabled() {
+        let mut model = TerminalModel::new(20, 6, 200, 120, 320);
+        model.feed(b"\x1b[2J\x1b[H");
+        model.feed(format!(
+            "\x1b_Ga=T,f=100,q=1;{}\x1b\\",
+            PROBE_PNG_BASE64
+        ));
+
+        let snapshot = model.snapshot();
+        let imaged: Vec<&CellSnapshot> = snapshot
+            .cells
+            .iter()
+            .filter(|cell| !cell.images.is_empty())
+            .collect();
+        // The upstream default config drops `_G` payloads silently; this
+        // assertion only holds because AndroidTerminalConfiguration enables
+        // kitty graphics.
+        assert_eq!(imaged.len(), 1);
+        let cell = imaged[0];
+        assert_eq!((cell.row, cell.column), (0, 0));
+        assert_eq!(cell.text, " ");
+        assert_eq!(cell.images.len(), 1);
+        let image = &cell.images[0];
+        assert_eq!(image.image_id(), Some(0));
+        assert_eq!(image.image_data().data().dimensions().ok(), Some((1, 1)));
+    }
+
+    #[test]
+    fn snapshot_row_cells_retains_blank_and_continuation_image_slices() {
+        let palette = android_palette();
+        let default_style = snapshot_attributes(&CellAttributes::blank(), &palette);
+        let data = Arc::new(ImageData::with_data(
+            wezterm_term::image::ImageDataType::new_single_frame(1, 1, vec![255, 0, 0, 255]),
+        ));
+        let slice = |z_index: i32, padding: (u16, u16, u16, u16)| {
+            ImageCell::with_z_index(
+                TextureCoordinate::new_f32(0.1, 0.2),
+                TextureCoordinate::new_f32(0.3, 0.4),
+                Arc::clone(&data),
+                z_index,
+                padding.0,
+                padding.1,
+                padding.2,
+                padding.3,
+                Some(7),
+                None,
+            )
+        };
+
+        // Column 1 continues the wide grapheme in column 0; its image slice
+        // would be invisible to `visible_cells`.
+        let mut continuation = Cell::blank();
+        continuation.attrs_mut().attach_image(Box::new(slice(3, (1, 2, 3, 4))));
+        // Two attachments inserted out of z-order on one text cell.
+        let mut text_cell = Cell::new_grapheme_with_width("X", 1, CellAttributes::blank());
+        text_cell
+            .attrs_mut()
+            .attach_image(Box::new(slice(5, (5, 6, 7, 8))));
+        text_cell
+            .attrs_mut()
+            .attach_image(Box::new(slice(-1, (9, 10, 11, 12))));
+
+        let mut line = Line::from_cells(
+            vec![
+                Cell::new_grapheme_with_width("中", 2, CellAttributes::blank()),
+                continuation,
+                text_cell,
+                Cell::new_grapheme_with_width("　", 2, CellAttributes::blank()),
+                {
+                    let mut trailing = Cell::blank();
+                    trailing
+                        .attrs_mut()
+                        .attach_image(Box::new(slice(-2, (0, 1, 2, 3))));
+                    trailing
+                },
+            ],
+            0,
+        );
+
+        let mut cells = Vec::new();
+        snapshot_row_cells(&mut line, 0, 5, &palette, default_style, &mut cells);
+
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| (cell.column, cell.text.as_str(), cell.width))
+                .collect::<Vec<_>>(),
+            vec![(0, "中", 2), (1, "", 1), (2, "X", 1), (4, "", 1)],
+        );
+        // Plain cells keep no images; the continuation column survives as an
+        // image-only entry despite being blank and default-styled.
+        assert!(cells[0].images.is_empty());
+        assert_eq!(cells[1].images.len(), 1);
+        assert_eq!(cells[1].images[0].z_index(), 3);
+        assert_eq!(cells[1].images[0].padding(), (1, 2, 3, 4));
+        // Multi-attachment keeps z-index order plus per-slice identity.
+        let z_indices: Vec<_> = cells[2].images.iter().map(|i| i.z_index()).collect();
+        assert_eq!(z_indices, vec![-1, 5]);
+        assert_eq!(cells[2].images[0].padding(), (9, 10, 11, 12));
+        assert_eq!(cells[2].images[1].padding(), (5, 6, 7, 8));
+        assert_eq!(
+            cells[2].images[1].top_left(),
+            TextureCoordinate::new_f32(0.1, 0.2)
+        );
+        // Every slice still references the same shared image data.
+        assert_eq!(
+            cells[1].images[0].image_data(),
+            cells[2].images[0].image_data()
+        );
+        // A blank wide base must not suppress the image on its continuation.
+        assert_eq!(cells[3].images[0].z_index(), -2);
+        assert_eq!(cells.iter().map(|cell| cell.column).max(), Some(4));
     }
 }

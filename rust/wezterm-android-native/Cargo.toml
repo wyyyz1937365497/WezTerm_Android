@@ -19,6 +19,7 @@ pollster = "0.4"
 raw-window-handle = "0.6"
 serde_json = "1.0"
 wgpu = { version = "25.0.2", default-features = false, features = ["vulkan", "wgsl"] }
+wezterm-blob-leases = { git = "https://github.com/wezterm/wezterm.git", rev = "d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b", features = ["simple_tempdir"] }
 wezterm-android-core = { path = "../wezterm-android-core" }
 wezterm-android-font = { path = "../wezterm-android-font" }
 wezterm-android-mux = { path = "../wezterm-android-mux" }

@@ -1,6 +1,6 @@
 # WezTerm Android 开发与维护记录
 
-最后更新：2026-09-14
+最后更新：2026-09-29
 
 当前版本：`v0.2.4`
 
@@ -32,15 +32,17 @@ WezTerm 上游基线：`d2f3f05b38f26a872f4b0bfbb3d2eaa7bdfc1b0b`
 | 默认终端字体 | MesloLGS Nerd Font Mono Regular + Noto Sans Math |
 | CJK fallback | Android 系统 Noto Sans CJK SC |
 | GPU 路径 | wgpu / Vulkan / `ANativeWindow` |
+| 图像渲染 | 字形 atlas 之外独立 2048 × 2048 RGBA image atlas（≤16 MiB，LRU 有界） |
 | 远程模式 | 普通 SSH、SSHMUX |
 | 真机基线 | OPD2407 / OP615AL1，Android 15 / API 35，Mali-G615 MC6 |
 | 发布性质 | ARM64、release 构建 + debug 密钥签名（保留 debuggable）、GitHub Release |
 
-当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、普通
-SSH、SSHMUX、命名 MUX 连接配置与下拉选择、动态标签标题、安全分离、标签控制与活动
-标签恢复、每标签独立滚动位置与历史视口锚定、设置页终端缩放、单排顶部状态栏、应用
-内键盘、自动换行且按标签隔离草稿的中文输入框、TUI 滚轮、历史回滚、长按选择、系统
-剪贴板、Material 3 设置、中英文界面和失效连接自动重附着。
+当前版本已经形成以下实用闭环：原生窗口渲染、WezTerm cell 模型、字体 atlas、内联
+终端图像（iTerm2 OSC 1337/kitty/sixel 快照切片与 RGBA 图集渲染）、普通 SSH、
+SSHMUX、命名 MUX 连接配置与下拉选择、动态标签标题、安全分离、标签控制与活动
+标签恢复、每标签独立滚动位置与历史视口锚定、设置页终端缩放、竖屏两排/横屏单排
+顶部状态栏、应用内键盘、自动换行且按标签隔离草稿的中文输入框、TUI 滚轮、历史
+回滚、长按选择、系统剪贴板、Material 3 设置、中英文界面和失效连接自动重附着。
 
 ## 3. 开发历程
 
@@ -183,6 +185,38 @@ SSH、SSHMUX、命名 MUX 连接配置与下拉选择、动态标签标题、安
 - [无连接像素猫](../artifacts/app-screenshots/v0.1.0-idle-cat.png)
 - [Material 3 设置与版本信息](../artifacts/app-screenshots/v0.1.0-settings.png)
 
+### 3.10 内联终端图像管线（未发布）
+
+**动机**：旧版本在远端执行 `wezterm imgcat` 时终端区域保持空白——快照只保留文本
+cell，渲染器只有字形通道，per-cell 图像切片在快照过滤阶段即被丢弃。
+
+**实现**：
+
+- core 快照保留 `CellSnapshot.images`：三种来源（iTerm2 OSC 1337、sixel、kitty
+  `_G`）统一成为挂在该 cell 上的 `ImageCell` 切片，按 z 序携带 z-index、padding 与
+  纹理坐标；带切片的空白格与双宽 continuation 格在快照过滤中存活。kitty 载荷需要
+  `AndroidTerminalConfiguration` 显式开启 `enable_kitty_graphics`，否则上游解析器
+  静默丢弃；
+- native 新增与字形 atlas 并行的 2048 × 2048 RGBA image atlas：1 texel 采样 gutter
+  防止 linear 采样串色，64 px 行粒度满足 wgpu 256 字节 `bytes_per_row` 对齐，超大
+  图按 2 的幂做预乘 alpha 降采样直到放入；CPU 侧 shelf packer + LRU 逐出保证缓存
+  恒以 16 MiB 图集占用为上限，极端压力整体重置重传，单次 prepare 至多 16,384 个
+  切片实例；
+- SSHMUX 图像 PDU 反序列化为 blob 租约：附着时注册进程级 `SimpleTempDir` 存储
+  （应用私有 `files/image-blob-leases`），跨 detach/重附着保留，渲染时取回字节与
+  `EncodedFile` 同走 decode（PNG/APNG/GIF/WebP，未知格式不绘制）；
+- 动画计时：GIF/APNG 按墙钟选帧，单帧下限 20 ms，图集记录最早 `next_frame_due`；
+  100 ms UI poll 无新输出或快照无变化且到期时重跑 prepare+render，动画在该节拍上
+  推进。
+
+**证据与边界**：core 主机测试覆盖 iTerm2/kitty 切片保留与空白/continuation
+格存活（见 5.2 节）。OPD2407（Android 15）平板在 SSHMUX 会话中运行
+`wezterm imgcat` 后，[左红右蓝 PNG 截图](../artifacts/app-screenshots/android15-inline-image-mux-png.png)
+显示图像直接渲染在终端网格内（修复前该区域空白）。这张截图拍摄于新标签初始
+resize 修复前，因此图像在顶端而非居中；sixel、kitty、普通 SSH 图像路径与
+GIF/APNG 动画推进尚无真机证据。原生 crate 无法在 Linux host 链接测试，GPU 侧
+逻辑需要 ARM64 交叉构建与真机加载验证。
+
 ## 4. 关键问题、根因与解决方法
 
 ### 4.1 直接交叉编译桌面 GUI 会拉入桌面 Unix 依赖
@@ -314,6 +348,48 @@ MUX 就绪时使 `LAST_MUX_SNAPSHOT` 失效并 `pump_mux_terminal()` 重新拉�
 时间戳 txt（SSHMUX 走 `GetLines` RPC，锚点在 UI 线程捕获、RPC 等待在后台线程），
 且导出后选择与菜单保持打开。
 
+### 4.11 新建 MUX 标签继承旧窗口尺寸
+
+**现象**：平板新建标签后远端提示符显示在终端区域之外；隐藏/显示键盘使 Surface
+变化并触发 resize 后才恢复。修复前的远端 pane 曾报告 190×43，而平板终端实际网格
+不同。
+
+**根因**：远端复用现有 WezTerm window 新建 tab 时继承原活动 tab 的尺寸；客户端
+`ClientPane` 却缓存请求的尺寸，`pane.resize(size)` 因本地尺寸相等而不发送 RPC。
+Surface 不变时也不会再走 Android 的 resize 回调。
+
+**解决**：激活新 pane 时除本地 tab resize 外，显式发送当前 `RuntimeState.size`
+的 `MuxResize` RPC；接到 `Attached` 后立即同步此时最新的 Surface 行列和像素尺寸，
+覆盖连接期间发生的尺寸变化。待平板恢复 ADB 后，真机新建标签并用远端
+`wezterm cli list --format json` 或 `stty size` 核对；不以切换键盘作为验证步骤。
+
+### 4.12 SSHMUX 大图或多图累积导致原生 OOM abort
+
+**现象**：长时间使用 SSHMUX 后，应用在同一 mux 运行时线程上连续
+`SIGABRT`，进程在 3–5 秒内反复重启并回到桌面。`dumpsys activity exit-info`
+记录 `APP CRASH(NATIVE)`，tombstone 的调用栈落在 `wezterm-client` 的图片
+RPC 与 Rust 分配/panic 路径。
+
+**根因**：上游 `wezterm-client` 的跨 pane 图片缓存是 128 条**按数量**限制的
+`LruCache`，没有字节上限。内联截图每张解码后可达数十 MB，缓存可累积到数 GB；
+同时单张图片解码没有编码字节/像素/帧上限。Android 上 Rust 分配失败会直接
+abort，无法由 `catch_unwind` 恢复。
+
+**解决**：
+
+- 本地补丁 `rust/vendor/wezterm-client-android` 把图片缓存改为 8 条、单图
+  32 MiB、总量 128 MiB；超限图片记录警告并跳过，不再进入 LRU 或可见行；
+- 缓存锁从 `lock().unwrap()` 改为 poison 恢复，避免一次 panic 让后续所有
+  图片路径继续 panic；
+- native 解码前检查编码字节数（32 MiB）与图片头尺寸（解码后 64 MiB），
+  超限用占位图替换；
+- native 安装 Rust panic hook，把 panic 位置和 payload 写入 logcat
+  `WezTermAndroid`，不再只留下无符号 tombstone。
+
+**回归点**：连续发送多张 2800×2000 截图并滚动历史，确认进程内存不再随图片
+数量线性增长；发送超过上限的单图时终端保持可用并出现 `skipping inline image`
+警告；`cargo test` 与 `:app:assembleRelease` 通过。
+
 ## 5. 验证方法
 
 ### 5.1 Android 构建、JVM 测试和 Lint
@@ -339,7 +415,17 @@ cargo test --manifest-path rust/Cargo.toml \
   --locked -- --test-threads=1
 ```
 
-当前四个 app crate 共 31 个主机测试：core 13、font 6、SSH 5、MUX 7。
+当前四个 app crate 共 35 个主机测试：core 17、font 6、SSH 5、MUX 7。
+
+core 图像管线相关测试（可单独过滤复跑，例如
+`cargo test --manifest-path rust/Cargo.toml -p wezterm-android-core retains_iterm2 -- --test-threads=1`）：
+
+- `retains_iterm2_image_slice_on_a_blank_cell`：OSC 1337 imgcat 在空白默认样式 cell
+  上保留切片，且 padding/纹理坐标原样到达渲染边界；
+- `retains_kitty_image_slice_when_graphics_are_enabled`：kitty `_G` 载荷只在开启
+  `enable_kitty_graphics` 时保留切片；
+- `snapshot_row_cells_retains_blank_and_continuation_image_slices`：空白格与双宽
+  continuation 格的图像切片按 z 序存活于快照。
 
 不把以下两类失败误判为 Android 构建失败：
 
@@ -364,9 +450,34 @@ adb logcat -s WezTermAndroid
 2. 打开另一个应用后返回，确认同 pane 保持或自动重附着；
 3. 显示/隐藏应用键盘和系统 IME，确认 Surface 不被遮挡且 resize 正确；
 4. 单指 TUI 滚动、双指历史滚动、长按复制和粘贴；
-5. 新建、切换、关闭临时标签和安全 Detach；
+5. 新建、切换、关闭临时标签和安全 Detach；新建标签的验收标准是：标签切换完成后
+   即以当前 Surface 行列网格接收远端内容（`stty size` 与本地行列一致），无需通过
+   切换键盘等操作间接触发 resize；
 6. 远端动态改变标题，确认顶部标签自动刷新；
-7. 切换应用语言，确认终端、连接状态和 Material 深色界面保持。
+7. 切换应用语言，确认终端、连接状态和 Material 深色界面保持；
+8. 内联图像 imgcat 冒烟（见下），确认图像直接渲染在终端网格中；
+9. 建议补充：远端播放 GIF 确认动画按帧推进、连续 imgcat 多张图像后前后台切换，
+   确认无 `image atlas exhausted` 警告——这两项尚无真机证据，仅作为回归方向。
+
+#### 内联图像 imgcat 冒烟步骤
+
+在任意有 `python3` 的主机上生成确定性的左红右蓝探针 PNG：
+
+```bash
+python3 -c 'import zlib,struct;w,h=64,32;row=(b"\xff\x00\x00"+b"\x00\x00\xff")*(w//2);raw=b"".join(b"\x00"+row for _ in range(h));ch=lambda t,c:struct.pack(">I",len(c))+t+c+struct.pack(">I",zlib.crc32(t+c)&0xffffffff);open("/tmp/imgcat-probe.png","wb").write(b"\x89PNG\r\n\x1a\n"+ch(b"IHDR",struct.pack(">IIBBBBB",w,h,8,2,0,0,0))+ch(b"IDAT",zlib.compress(raw))+ch(b"IEND",b""))'
+```
+
+在应用内附着 SSHMUX 会话后，于远端 shell 执行并观察：
+
+```bash
+wezterm imgcat /tmp/imgcat-probe.png
+```
+
+预期：终端网格内出现左半红、右半蓝的 64 × 32 图像，无需清屏或重启会话；同时
+`adb logcat -s WezTermAndroid` 不出现 `image lease data unavailable` 或
+`image atlas exhausted` 警告。该步骤已在 OPD2407（Android 15）平板 SSHMUX 会话
+真机验证（修复前同操作终端区域空白）。sixel 与 kitty 发送端（如 `kitty +kitten
+icat`）共用同一快照/图集通路，但尚无真机证据，不作为验收门槛。
 
 ### 5.4 Debug 免密身份
 
@@ -406,6 +517,10 @@ adb logcat -s WezTermAndroid
 
 - 每个 terminal cell 当前只提交首个 shaped glyph；
 - 复杂 Indic/ZWJ cluster、彩色 emoji、粗体/斜体 face 尚未完整支持；
+- 内联图像仅 SSHMUX imgcat PNG 有 OPD2407 真机证据；sixel、kitty、普通 SSH 图像
+  路径与 GIF/APNG 动画推进尚待真机回归；
+- 图集写满时当前帧放不下的切片被跳过，并按退避间隔记录 `image atlas exhausted`
+  警告；动画帧推进依赖 100 ms UI poll 节拍；
 - 通用 OEM 字体发现、持久 glyph cache、OSC 8 链接尚未完成；
 - Android 原生选择手柄和边缘自动滚动待实现。
 

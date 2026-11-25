@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::LazyLock;
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
+use std::time::{Duration, Instant};
 use wezterm_android_core::{
     android_key_bytes, idle_cat_ansi, TerminalModel, TerminalSnapshot, UPSTREAM_WEZTERM_REVISION,
 };
@@ -35,6 +35,7 @@ use wezterm_android_ssh::{
     WEZTERM_REVISION as SSH_UPSTREAM_WEZTERM_REVISION,
 };
 use wezterm_term::TerminalSize as MuxTerminalSize;
+use wezterm_term::image::{ImageCell, ImageData, ImageDataType};
 use wgpu::util::DeviceExt;
 
 #[link(name = "android")]
@@ -53,6 +54,13 @@ thread_local! {
     static TERMINAL: RefCell<Option<TerminalModel>> = const { RefCell::new(None) };
     static LAST_MUX_SNAPSHOT: RefCell<Option<TerminalSnapshot>> = const { RefCell::new(None) };
     static LAST_VIEW_SNAPSHOT: RefCell<Option<TerminalSnapshot>> = const { RefCell::new(None) };
+    /// Content signature of the image pixels in the last rendered snapshot.
+    /// `TerminalSnapshot` equality cannot see kitty in-place pixel edits
+    /// (`ImageData::hash()` is captured at creation time), so this extra
+    /// signature — identity plus the mutable per-frame hashes upstream
+    /// refreshes on every edit — decides whether an otherwise unchanged mux
+    /// snapshot still needs a redraw.
+    static LAST_IMAGE_CONTENT: RefCell<Vec<[u8; 32]>> = const { RefCell::new(Vec::new()) };
     static VIEW_INTERACTION: RefCell<ViewInteraction> = const { RefCell::new(ViewInteraction::new()) };
     // SSHMUX scrollback viewport anchors are remembered per remote tab so a
     // switch (toolbar, restore, or another client) returns to the position
@@ -65,6 +73,7 @@ thread_local! {
 static LOGGING: Once = Once::new();
 static SSH_SESSION: OnceLock<Mutex<Option<AndroidSshSession>>> = OnceLock::new();
 static MUX_SESSION: OnceLock<Mutex<Option<AndroidMuxSession>>> = OnceLock::new();
+static IMAGE_BLOB_STORAGE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 static MUX_READY: AtomicBool = AtomicBool::new(false);
 static TERMINAL_ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
 /// Reply channel for one in-flight SSHMUX viewport export. Stored by the
@@ -81,6 +90,46 @@ const TERMINAL_ZOOM_MAX_PERCENT: u32 = 200;
 const MAX_TERMINAL_CELLS: usize = 65_536;
 const GLYPH_ATLAS_WIDTH: u32 = 1024;
 const GLYPH_ATLAS_HEIGHT: u32 = 1024;
+/// RGBA atlas holding decoded terminal imagery (iTerm2/sixel/kitty slices).
+/// 2048x2048x4 = 16 MiB of GPU memory; every placement costs at most this
+/// bound, so image caching can never grow without limit.
+const IMAGE_ATLAS_WIDTH: u32 = 2048;
+const IMAGE_ATLAS_HEIGHT: u32 = 2048;
+/// One blank texel ring around each atlas placement prevents linear
+/// sampling from bleeding neighboring images into each other.
+const IMAGE_ATLAS_GUTTER: u32 = 1;
+/// Atlas blocks are rounded up to this many pixels per row so every
+/// `queue.write_texture` `bytes_per_row` is 256-byte aligned (wgpu requires
+/// it): 64 px * 4 bytes/pixel.
+const IMAGE_UPLOAD_ROW_GRANULARITY: u32 = 64;
+/// Upper bound on image slice quads uploaded per prepare; well above any
+/// realistic viewport (each visible cell slice costs one instance).
+const MAX_IMAGE_INSTANCES: usize = 16_384;
+/// Animated imagery never advances faster than this, matching the effective
+/// floor upstream applies through its max_fps frame budget.
+const MIN_IMAGE_FRAME_DURATION: Duration = Duration::from_millis(20);
+/// Reject one encoded image larger than this before decoding. Android turns a
+/// failed Rust allocation into an abort, so a single oversized payload must
+/// never reach the decoder.
+const MAX_ENCODED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+/// Reject one decoded image (or animation) larger than this. Static images
+/// are checked from their header before decoding; animations are re-checked
+/// after decode because frame count is not in the header.
+const MAX_DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Safe in-memory footprint for any image variant. `ImageData::len()` panics
+/// on an empty `AnimRgba8` frame list, which a malformed payload can produce.
+fn image_data_type_len(data: &ImageDataType) -> usize {
+    match data {
+        ImageDataType::EncodedFile(bytes) => bytes.len(),
+        ImageDataType::EncodedLease(_) => 0,
+        ImageDataType::Rgba8 { data, .. } => data.len(),
+        ImageDataType::AnimRgba8 { frames, .. } => frames.iter().map(Vec::len).sum(),
+    }
+}
+/// Kitty images at or below this z (upstream: `i32::MIN / 2`) render beneath
+/// every cell background, not just beneath the text layer.
+const DEEP_IMAGE_Z_THRESHOLD: i32 = i32::MIN / 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CellPoint {
@@ -158,7 +207,15 @@ struct ViewUniform {
     cursor_cell: [f32; 2],
     padding: [f32; 2],
     terminal_size: [u32; 2],
-    _reserved: [u32; 2],
+    /// 0 renders the background layer, 1 the text layer; see shader.wgsl.
+    mode: u32,
+    _pad: u32,
+    /// Android's default terminal cell background (black), used only while
+    /// deep negative-z imagery is visible to leave default cells unpainted.
+    default_background: [f32; 3],
+    /// 1 lets the background pass leave cells matching `default_background`
+    /// unpainted; 0 paints every cell opaquely (no deep imagery present).
+    skip_default_background: u32,
 }
 
 #[repr(C)]
@@ -185,6 +242,482 @@ impl Default for CellRenderData {
             flags: [0; 4],
         }
     }
+}
+
+/// One instanced image-slice quad; matches `ImageInstance` in shader.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageInstance {
+    /// Quad rect in surface pixels, y down: x0, y0, x1, y1.
+    rect: [f32; 4],
+    /// Source rect inside the RGBA image atlas: u0, v0, u1, v1.
+    uv: [f32; 4],
+}
+
+/// Cache key for one uploaded animation frame of one image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ImageCacheKey {
+    /// `ImageData::hash()` — the image identity shared by every cell slice
+    /// of a placement. Captured at creation time, so it never changes even
+    /// when kitty edits mutate the pixel bytes in place.
+    hash: [u8; 32],
+    /// Content hash of the exact uploaded pixels (`Rgba8.hash` or
+    /// `AnimRgba8.hashes[frame]`, refreshed upstream on every in-place
+    /// edit), so an edited frame uploads into a fresh placement instead of
+    /// keep displaying the stale one.
+    content: [u8; 32],
+    frame: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ImageAtlasRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl ImageAtlasRect {
+    /// The placement block including the sampling gutter, rounded to the
+    /// upload row granularity exactly as the packer reserved it.
+    fn outer(self) -> ImageAtlasRect {
+        ImageAtlasRect {
+            x: self.x.saturating_sub(IMAGE_ATLAS_GUTTER),
+            y: self.y.saturating_sub(IMAGE_ATLAS_GUTTER),
+            width: (self.width + 2 * IMAGE_ATLAS_GUTTER)
+                .next_multiple_of(IMAGE_UPLOAD_ROW_GRANULARITY),
+            height: self.height + 2 * IMAGE_ATLAS_GUTTER,
+        }
+    }
+}
+
+struct ImageAtlasEntry {
+    rect: ImageAtlasRect,
+    last_used: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ImageShelf {
+    y: u32,
+    height: u32,
+    used_x: u32,
+}
+
+/// CPU-side bookkeeping for the RGBA image atlas: a shelf packer plus an
+/// LRU-evicted entry map. Entries are (image identity, animation frame);
+/// pixels live only in the GPU texture, so the cache is bounded by the atlas
+/// footprint no matter how many images the terminal produces.
+struct ImageAtlasManager {
+    entries: HashMap<ImageCacheKey, ImageAtlasEntry>,
+    /// Blocks released by eviction, usable for same-or-smaller placements.
+    free: Vec<ImageAtlasRect>,
+    shelves: Vec<ImageShelf>,
+    bump_y: u32,
+    generation: u64,
+    width: u32,
+    height: u32,
+    /// Wall-clock start per animated image, driving frame selection.
+    anim_started: HashMap<[u8; 32], Instant>,
+    /// Frame chosen once per image and prepare; all slices of a frame agree.
+    frame_for_prepare: HashMap<[u8; 32], usize>,
+    /// Earliest moment a visible animation wants its next frame drawn.
+    next_frame_due: Option<Instant>,
+    /// Encoded payloads decoded during the current prepare, memoized by
+    /// image identity so every cell slice of one image shares a single
+    /// decode. Cleared with the prepare.
+    decoded: HashMap<[u8; 32], ImageDataType>,
+    /// Decoded frame metadata resolved once per encoded image and prepare.
+    encoded_frame_for_prepare: HashMap<[u8; 32], (u32, u32, u32, [u8; 32])>,
+    /// Where the pixels of a still-encoded image were last uploaded, so
+    /// later prepares resolve resident placements without re-reading and
+    /// re-decoding the payload. Animated encoded images always decode (they
+    /// must, to advance frames).
+    encoded_placements: HashMap<[u8; 32], EncodedPlacement>,
+    /// True when the previous prepare still could not place every visible
+    /// slice after a rebuild attempt; suppresses further cache-wiping
+    /// rebuilds until a prepare fits again.
+    exhausted: bool,
+    /// Placements dropped this prepare because the atlas was exhausted.
+    skipped: usize,
+    /// Prepares since the last "atlas exhausted" warning.
+    warn_backoff: u32,
+}
+
+/// Learned placement state for a still-encoded image payload.
+#[derive(Clone, Copy)]
+enum EncodedPlacement {
+    /// The uploaded key of a single-frame image; resident keys skip decode.
+    Still(ImageCacheKey),
+    /// The payload decodes to an animation and must decode every prepare.
+    Animated,
+}
+
+impl ImageAtlasManager {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            entries: HashMap::new(),
+            free: Vec::new(),
+            shelves: Vec::new(),
+            bump_y: 0,
+            generation: 0,
+            width,
+            height,
+            anim_started: HashMap::new(),
+            frame_for_prepare: HashMap::new(),
+            next_frame_due: None,
+            decoded: HashMap::new(),
+            encoded_frame_for_prepare: HashMap::new(),
+            encoded_placements: HashMap::new(),
+            exhausted: false,
+            skipped: 0,
+            warn_backoff: 0,
+        }
+    }
+
+    fn begin_generation(&mut self) {
+        self.generation += 1;
+        self.skipped = 0;
+        self.frame_for_prepare.clear();
+        self.encoded_frame_for_prepare.clear();
+        self.next_frame_due = None;
+    }
+
+    /// Allocates an inner (gutter-excluded) rect for `width` x `height`.
+    /// The reserved block is rounded up to the upload row granularity; the
+    /// returned rect describes only the image area so UVs stay exact.
+    fn allocate(&mut self, width: u32, height: u32) -> Option<ImageAtlasRect> {
+        let padded_width = (width.checked_add(2 * IMAGE_ATLAS_GUTTER)?)
+            .next_multiple_of(IMAGE_UPLOAD_ROW_GRANULARITY);
+        let padded_height = height.checked_add(2 * IMAGE_ATLAS_GUTTER)?;
+        if padded_width > self.width || padded_height > self.height {
+            return None;
+        }
+        if let Some(index) = self
+            .free
+            .iter()
+            .position(|block| block.width >= padded_width && block.height >= padded_height)
+        {
+            let block = self.free.swap_remove(index);
+            if block.width > padded_width {
+                // Keep the unused tail of the block available; it is a whole
+                // row-granularity multiple, so later placements can use it.
+                self.free.push(ImageAtlasRect {
+                    x: block.x + padded_width,
+                    y: block.y,
+                    width: block.width - padded_width,
+                    height: block.height,
+                });
+            }
+            return Some(ImageAtlasRect {
+                x: block.x + IMAGE_ATLAS_GUTTER,
+                y: block.y + IMAGE_ATLAS_GUTTER,
+                width,
+                height,
+            });
+        }
+        if let Some(shelf) = self.shelves.last_mut() {
+            if shelf.height >= padded_height && shelf.used_x + padded_width <= self.width {
+                let x = shelf.used_x;
+                shelf.used_x += padded_width;
+                return Some(ImageAtlasRect {
+                    x: x + IMAGE_ATLAS_GUTTER,
+                    y: shelf.y + IMAGE_ATLAS_GUTTER,
+                    width,
+                    height,
+                });
+            }
+        }
+        if self.bump_y + padded_height <= self.height {
+            let y = self.bump_y;
+            self.bump_y += padded_height;
+            self.shelves.push(ImageShelf {
+                y,
+                height: padded_height,
+                used_x: padded_width,
+            });
+            return Some(ImageAtlasRect {
+                x: IMAGE_ATLAS_GUTTER,
+                y: y + IMAGE_ATLAS_GUTTER,
+                width,
+                height,
+            });
+        }
+        None
+    }
+
+    /// Allocates after evicting least-recently-used entries that no visible
+    /// cell referenced this generation. Returning `None` means even every
+    /// dead entry freed could not satisfy the request.
+    fn allocate_with_eviction(&mut self, width: u32, height: u32) -> Option<ImageAtlasRect> {
+        if let Some(rect) = self.allocate(width, height) {
+            return Some(rect);
+        }
+        let mut dead: Vec<(ImageCacheKey, u64)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.last_used < self.generation)
+            .map(|(key, entry)| (*key, entry.last_used))
+            .collect();
+        dead.sort_by_key(|(_, last_used)| *last_used);
+        for (key, _) in dead {
+            let Some(entry) = self.entries.remove(&key) else {
+                continue;
+            };
+            let placement_matches = matches!(
+                self.encoded_placements.get(&key.hash),
+                Some(EncodedPlacement::Still(stored)) if *stored == key
+            );
+            if placement_matches {
+                // The resident fast path pointed at the evicted placement;
+                // drop it so the next prepare re-decodes and re-uploads.
+                self.encoded_placements.remove(&key.hash);
+            }
+            self.free.push(entry.rect.outer());
+            if let Some(rect) = self.allocate(width, height) {
+                return Some(rect);
+            }
+        }
+        None
+    }
+
+    /// Drops all placements. Used under extreme atlas pressure so the whole
+    /// visible set can be re-uploaded contiguously next pass instead of
+    /// thrashing one eviction at a time.
+    fn reset(&mut self) {
+        self.entries.clear();
+        self.free.clear();
+        self.shelves.clear();
+        self.bump_y = 0;
+        self.frame_for_prepare.clear();
+        self.encoded_frame_for_prepare.clear();
+        self.encoded_placements.clear();
+        self.decoded.clear();
+        self.exhausted = false;
+    }
+
+    /// Prune only after visiting every visible slice. Replacing a frame can
+    /// evict the previous placement before its replacement is inserted.
+    fn finish_generation(&mut self) {
+        let selected = &self.frame_for_prepare;
+        self.anim_started.retain(|hash, _| selected.contains_key(hash));
+    }
+
+    /// Returns the animation frame a wall-clock reader should display right
+    /// now, recording when the following frame becomes due. Non-animated
+    /// images report frame 0 and set no deadline.
+    fn frame_index_for(&mut self, hash: [u8; 32], durations: &[Duration]) -> usize {
+        Self::select_frame(
+            &mut self.anim_started,
+            &mut self.frame_for_prepare,
+            &mut self.next_frame_due,
+            hash,
+            durations,
+        )
+    }
+
+    fn select_frame(
+        anim_started: &mut HashMap<[u8; 32], Instant>,
+        frame_for_prepare: &mut HashMap<[u8; 32], usize>,
+        next_frame_due: &mut Option<Instant>,
+        hash: [u8; 32],
+        durations: &[Duration],
+    ) -> usize {
+        if durations.is_empty() {
+            return 0;
+        }
+        if let Some(&frame) = frame_for_prepare.get(&hash) {
+            return frame;
+        }
+        let total: Duration = durations
+            .iter()
+            .map(|duration| (*duration).max(MIN_IMAGE_FRAME_DURATION))
+            .sum();
+        if total.is_zero() {
+            return 0;
+        }
+        let now = Instant::now();
+        let started = *anim_started.entry(hash).or_insert(now);
+        let mut elapsed = now.saturating_duration_since(started);
+        if elapsed >= total {
+            elapsed = Duration::from_nanos(elapsed.as_nanos().rem_euclid(total.as_nanos()) as u64);
+        }
+        let mut frame = 0;
+        let mut remaining = elapsed;
+        let mut time_to_next_frame = total - elapsed;
+        for (index, duration) in durations.iter().enumerate() {
+            let duration = (*duration).max(MIN_IMAGE_FRAME_DURATION);
+            if remaining < duration {
+                frame = index;
+                time_to_next_frame = duration - remaining;
+                break;
+            }
+            remaining -= duration;
+        }
+        let due = now + time_to_next_frame;
+        *next_frame_due = Some(match *next_frame_due {
+            Some(existing) => existing.min(due),
+            None => due,
+        });
+        frame_for_prepare.insert(hash, frame);
+        frame
+    }
+
+    /// Decodes an encoded payload at most once per prepare; every cell slice
+    /// of an image shares the decoded pixels. Failed decodes are memoized too.
+    fn decode_memoized(
+        &mut self,
+        identity: [u8; 32],
+        load: impl FnOnce() -> std::result::Result<Vec<u8>, String>,
+    ) -> Option<()> {
+        if !self.decoded.contains_key(&identity) {
+            let bytes = load().unwrap_or_else(|error| {
+                log::warn!("{error}");
+                Vec::new()
+            });
+            let decoded = if bytes.len() > MAX_ENCODED_IMAGE_BYTES {
+                log::warn!(
+                    "skipping inline image: {} encoded bytes exceeds {} byte limit",
+                    bytes.len(),
+                    MAX_ENCODED_IMAGE_BYTES
+                );
+                ImageDataType::placeholder()
+            } else {
+                let encoded = ImageDataType::EncodedFile(bytes);
+                let too_many_pixels = encoded
+                    .dimensions()
+                    .map(|(width, height)| {
+                        u64::from(width) * u64::from(height) * 4
+                            > MAX_DECODED_IMAGE_BYTES as u64
+                    })
+                    .unwrap_or(false);
+                if too_many_pixels {
+                    log::warn!(
+                        "skipping inline image: dimensions exceed {} byte decoded limit",
+                        MAX_DECODED_IMAGE_BYTES
+                    );
+                    ImageDataType::placeholder()
+                } else {
+                    let decoded = encoded.decode();
+                    let decoded_len = image_data_type_len(&decoded);
+                    if decoded_len > MAX_DECODED_IMAGE_BYTES {
+                        log::warn!(
+                            "skipping inline image: {} decoded bytes exceeds {} byte limit",
+                            decoded_len,
+                            MAX_DECODED_IMAGE_BYTES
+                        );
+                        ImageDataType::placeholder()
+                    } else {
+                        decoded
+                    }
+                }
+            };
+            self.decoded.insert(identity, decoded);
+        }
+        match self.decoded.get(&identity)? {
+            ImageDataType::Rgba8 { .. } | ImageDataType::AnimRgba8 { .. } => Some(()),
+            // decode() kept the bytes encoded because it did not recognize
+            // the payload; there is nothing renderable.
+            _ => None,
+        }
+    }
+
+    /// Resolves one decoded image's current placement key once per prepare.
+    fn encoded_frame_meta(&mut self, identity: [u8; 32]) -> Option<(u32, u32, u32, [u8; 32])> {
+        if let Some(&metadata) = self.encoded_frame_for_prepare.get(&identity) {
+            return Some(metadata);
+        }
+        let metadata = match self.decoded.get(&identity)? {
+            ImageDataType::Rgba8 {
+                width, height, hash, ..
+            } => (*width, *height, 0, *hash),
+            ImageDataType::AnimRgba8 {
+                width,
+                height,
+                hashes,
+                durations,
+                ..
+            } => {
+                if hashes.is_empty() {
+                    return None;
+                }
+                let frame = if hashes.len() > 1 {
+                    Self::select_frame(
+                        &mut self.anim_started,
+                        &mut self.frame_for_prepare,
+                        &mut self.next_frame_due,
+                        identity,
+                        durations,
+                    )
+                    .min(hashes.len() - 1)
+                } else {
+                    0
+                };
+                (*width, *height, frame as u32, hashes[frame])
+            }
+            _ => return None,
+        };
+        self.encoded_frame_for_prepare.insert(identity, metadata);
+        Some(metadata)
+    }
+}
+
+/// Pixel bytes for one animation frame, ready for atlas upload.
+type FramePixels = Vec<u8>;
+
+fn decimate_rgba(data: &[u8], width: u32, height: u32, factor: u32) -> Vec<u8> {
+    let out_width = width.div_ceil(factor);
+    let out_height = height.div_ceil(factor);
+    let mut out = Vec::with_capacity((out_width * out_height * 4) as usize);
+    for out_y in 0..out_height {
+        let source_y = out_y * factor;
+        let rows = factor.min(height.saturating_sub(source_y)).max(1);
+        for out_x in 0..out_width {
+            let source_x = out_x * factor;
+            let columns = factor.min(width.saturating_sub(source_x)).max(1);
+            // Average in premultiplied alpha so transparent borders do not
+            // bleed dark fringes into visible pixels; the result is emitted
+            // as straight alpha below.
+            let mut sum = [0u64; 4];
+            for y in 0..rows {
+                for x in 0..columns {
+                    let offset =
+                        (((source_y + y) * width + (source_x + x)) * 4) as usize;
+                    let pixel = &data[offset..offset + 4];
+                    let alpha = u64::from(pixel[3]);
+                    sum[0] += u64::from(pixel[0]) * alpha;
+                    sum[1] += u64::from(pixel[1]) * alpha;
+                    sum[2] += u64::from(pixel[2]) * alpha;
+                    sum[3] += alpha;
+                }
+            }
+            let count = (rows * columns) as u64;
+            // Back to straight alpha: padded_rgba premultiplies exactly once
+            // on upload, and division by summed alpha recovers the averaged
+            // color losslessly (sum[c] <= 255 * sum[a]).
+            if sum[3] == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                out.push((sum[0] / sum[3]) as u8);
+                out.push((sum[1] / sum[3]) as u8);
+                out.push((sum[2] / sum[3]) as u8);
+                out.push((sum[3] / count) as u8);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug)]
+struct PreparedImages {
+    instances: Vec<ImageInstance>,
+    /// How many leading instances belong to the deep z<i32::MIN/2 layer,
+    /// drawn before opaque cell backgrounds.
+    deep_count: usize,
+    /// How many following instances belong to the ordinary z<0
+    /// behind-text layer.
+    behind_count: usize,
 }
 
 struct PreparedTerminal {
@@ -326,6 +859,19 @@ fn rgba_to_float(color: [u8; 4]) -> [f32; 4] {
     color.map(|channel| f32::from(channel) / 255.0)
 }
 
+/// The Android palette fixes the default cell background to black. Deep
+/// negative-z imagery sits under any cell with a non-default background, so
+/// the background pass leaves black cells transparent only when such imagery
+/// is present. No per-frame color histogram or allocation is required.
+fn deep_background_state(terminal: &TerminalSnapshot) -> (u32, [f32; 3]) {
+    let has_deep_images = terminal.cells.iter().any(|cell| {
+        cell.images
+            .iter()
+            .any(|image| image.z_index() < DEEP_IMAGE_Z_THRESHOLD)
+    });
+    (u32::from(has_deep_images), [0.0; 3])
+}
+
 fn prepare_terminal(
     fonts: &mut FontSet,
     terminal: &TerminalSnapshot,
@@ -457,6 +1003,409 @@ fn log_prepared_terminal(prepared: &PreparedTerminal) {
     );
 }
 
+/// Copies one RGBA image into a gutter-padded buffer with replicated border
+/// texels so linear sampling at placement edges cannot bleed into neighbors,
+/// premultiplying RGB by alpha on the way in: the image pipeline samples with
+/// a linear filter and composites with premultiplied blending, so filtering
+/// straight-alpha RGB would produce dark fringes against transparent black.
+/// Rows are padded out to `stride_px` pixels so the resulting byte stride
+/// satisfies wgpu's 256-byte `bytes_per_row` alignment (64 px * 4 bytes).
+fn padded_rgba(bytes: &[u8], width: u32, height: u32, stride_px: u32) -> Vec<u8> {
+    debug_assert!(stride_px >= width + 2 * IMAGE_ATLAS_GUTTER);
+    let stride = stride_px as usize * 4;
+    let mut out = vec![0u8; stride * (height as usize + 2)];
+    let source_stride = (width * 4) as usize;
+    let inner = width as usize * 4;
+    let premultiply = |pixel: [u8; 4]| -> [u8; 4] {
+        let alpha = pixel[3] as u16;
+        [
+            ((pixel[0] as u16 * alpha + 127) / 255) as u8,
+            ((pixel[1] as u16 * alpha + 127) / 255) as u8,
+            ((pixel[2] as u16 * alpha + 127) / 255) as u8,
+            pixel[3],
+        ]
+    };
+    for row in 0..height as usize {
+        let source = &bytes[row * source_stride..(row + 1) * source_stride];
+        let destination = (row + 1) * stride;
+        let first_pixel = premultiply(source[..4].try_into().expect("4-byte pixel"));
+        out[destination..destination + 4].copy_from_slice(&first_pixel);
+        for (target, pixel) in out[destination + 4..destination + 4 + inner]
+            .chunks_exact_mut(4)
+            .zip(source.chunks_exact(4))
+        {
+            target.copy_from_slice(&premultiply(pixel.try_into().expect("4-byte pixel")));
+        }
+        let last_pixel = premultiply(
+            source[source_stride - 4..]
+                .try_into()
+                .expect("4-byte pixel"),
+        );
+        out[destination + 4 + inner..destination + 8 + inner].copy_from_slice(&last_pixel);
+    }
+    let first = row_of(1, stride);
+    let last = row_of(height as usize, stride);
+    out.copy_within(first..first + stride, 0);
+    let after_last = row_of(height as usize + 1, stride);
+    out.copy_within(last..last + stride, after_last);
+    out
+}
+
+fn row_of(row: usize, stride: usize) -> usize {
+    row * stride
+}
+
+/// Resolves one `ImageCell` slice into an uploaded atlas placement and the
+/// instance quad that draws it. Returns `None` when the slice has no usable
+/// pixels or when atlas pressure left no room for it.
+///
+/// Placement resolution runs strictly before any payload read or decode: a
+/// resident placement is a map lookup, and an encoded payload is read and
+/// decoded at most once per prepare (memoized by image identity) no matter
+/// how many cell slices reference it.
+fn process_image_slice(
+    atlas: &mut ImageAtlasManager,
+    queue: &wgpu::Queue,
+    image_texture: &wgpu::Texture,
+    image_cell: &ImageCell,
+    quad: [f32; 4],
+) -> Option<ImageInstance> {
+    let image_data: &Arc<ImageData> = image_cell.image_data();
+    let identity = image_data.hash();
+
+    // Resident placement fast path for still-encoded images: the payload
+    // never changes under an identity (in-place kitty edits only touch
+    // decoded RGBA storage), so a known-resident key skips the lease read
+    // and full decode entirely.
+    if let Some(EncodedPlacement::Still(key)) =
+        atlas.encoded_placements.get(&identity).copied()
+    {
+        if let Some(entry) = atlas.entries.get_mut(&key) {
+            entry.last_used = atlas.generation;
+            let rect = entry.rect;
+            return Some(image_instance_for(image_cell, atlas, rect, quad));
+        }
+    }
+
+    let guard = image_data.data();
+    let from_encoded = matches!(
+        &*guard,
+        ImageDataType::EncodedFile(_) | ImageDataType::EncodedLease(_)
+    );
+    let (width, height, frame, content): (u32, u32, u32, [u8; 32]) = match &*guard {
+        ImageDataType::Rgba8 {
+            width, height, hash, ..
+        } => (*width, *height, 0, *hash),
+        ImageDataType::AnimRgba8 {
+            width,
+            height,
+            frames,
+            durations,
+            hashes,
+        } => {
+            if frames.is_empty() {
+                return None;
+            }
+            let frame = if frames.len() > 1 {
+                atlas.frame_index_for(identity, durations).min(frames.len() - 1)
+            } else {
+                0
+            };
+            (
+                *width,
+                *height,
+                frame as u32,
+                hashes.get(frame).copied().unwrap_or([0; 32]),
+            )
+        }
+        ImageDataType::EncodedFile(bytes) => {
+            // The closure defers the byte clone until a memo miss, so cell
+            // slices after the first never copy the payload.
+            atlas.decode_memoized(identity, || Ok(bytes.clone()))?;
+            atlas.encoded_frame_meta(identity)?
+        }
+        ImageDataType::EncodedLease(lease) => {
+            atlas.decode_memoized(identity, || {
+                lease
+                    .get_data()
+                    .map_err(|error| format!("image lease data unavailable: {error:#}"))
+            })?;
+            atlas.encoded_frame_meta(identity)?
+        }
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let key = ImageCacheKey {
+        hash: identity,
+        content,
+        frame,
+        width,
+        height,
+    };
+    if let Some(entry) = atlas.entries.get_mut(&key) {
+        entry.last_used = atlas.generation;
+        let rect = entry.rect;
+        return Some(image_instance_for(image_cell, atlas, rect, quad));
+    }
+
+    // Cache miss: fetch this frame's byte payload. RGBA payloads borrow
+    // straight out of the shared ImageData, decoded ones out of the memo.
+    let frame_index = frame as usize;
+    let raw: &[u8] = match &*guard {
+        ImageDataType::Rgba8 { data, .. } => data.as_slice(),
+        ImageDataType::AnimRgba8 { frames, .. } => frames
+            .get(frame_index)
+            .map(|frame| &frame[..])
+            .unwrap_or(&[]),
+        _ => {
+            let decoded = atlas.decoded.get(&identity)?;
+            match decoded {
+                ImageDataType::Rgba8 { data, .. } => data.as_slice(),
+                ImageDataType::AnimRgba8 { frames, .. } => frames
+                    .get(frame_index)
+                    .map(|frame| &frame[..])
+                    .unwrap_or(&[]),
+                _ => return None,
+            }
+        }
+    };
+    let expected = width as usize * height as usize * 4;
+    if raw.len() < expected {
+        log::warn!(
+            "image payload is {} bytes but {}x{} needs {expected}; skipping slice",
+            raw.len(),
+            width,
+            height,
+        );
+        return None;
+    }
+
+    // Decimate by powers of two until the image fits the atlas even alone;
+    // the image-relative UV mapping is unaffected by whole-image scaling.
+    let mut factor = 1u32;
+    while (width.div_ceil(factor) + 2 * IMAGE_ATLAS_GUTTER)
+        .next_multiple_of(IMAGE_UPLOAD_ROW_GRANULARITY)
+        > atlas.width
+        || height.div_ceil(factor) + 2 * IMAGE_ATLAS_GUTTER > atlas.height
+    {
+        factor = factor.checked_mul(2)?;
+    }
+    let (alloc_width, alloc_height) = if factor == 1 {
+        (width, height)
+    } else {
+        (width.div_ceil(factor), height.div_ceil(factor))
+    };
+    // Pad the upload row stride so `bytes_per_row` stays 256-byte aligned
+    // (wgpu validation); the packer reserves exactly this block width.
+    let upload_stride_px = (alloc_width + 2 * IMAGE_ATLAS_GUTTER)
+        .next_multiple_of(IMAGE_UPLOAD_ROW_GRANULARITY);
+    let upload: FramePixels = if factor == 1 {
+        padded_rgba(raw, alloc_width, alloc_height, upload_stride_px)
+    } else {
+        let scaled = decimate_rgba(raw, width, height, factor);
+        padded_rgba(&scaled, alloc_width, alloc_height, upload_stride_px)
+    };
+
+    let Some(rect) = atlas.allocate_with_eviction(alloc_width, alloc_height) else {
+        atlas.skipped += 1;
+        return None;
+    };
+    let outer = rect.outer();
+    debug_assert_eq!(outer.width, upload_stride_px);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: image_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: outer.x,
+                y: outer.y,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        upload.as_slice(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(upload_stride_px * 4),
+            rows_per_image: Some(outer.height),
+        },
+        wgpu::Extent3d {
+            width: upload_stride_px,
+            height: outer.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    atlas.entries.insert(
+        key,
+        ImageAtlasEntry {
+            rect,
+            last_used: atlas.generation,
+        },
+    );
+    if from_encoded {
+        // Remember where a still-encoded payload landed so later prepares
+        // skip its decode; multi-frame animated payloads always decode to
+        // advance, single-frame animation containers act as stills.
+        let animated = match atlas.decoded.get(&identity) {
+            Some(ImageDataType::AnimRgba8 { frames, .. }) => frames.len() > 1,
+            _ => false,
+        };
+        atlas.encoded_placements.insert(
+            identity,
+            if animated {
+                EncodedPlacement::Animated
+            } else {
+                EncodedPlacement::Still(key)
+            },
+        );
+    }
+    Some(image_instance_for(image_cell, atlas, rect, quad))
+}
+
+/// Builds the draw quad UVs for a slice: the cell's image-relative texture
+/// coordinates mapped through the image's atlas placement.
+fn image_instance_for(
+    image_cell: &ImageCell,
+    atlas: &ImageAtlasManager,
+    rect: ImageAtlasRect,
+    quad: [f32; 4],
+) -> ImageInstance {
+    let top_left = image_cell.top_left();
+    let bottom_right = image_cell.bottom_right();
+    let (mut u0, mut v0) = (top_left.x.into_inner(), top_left.y.into_inner());
+    let (mut u1, mut v1) = (
+        bottom_right.x.into_inner(),
+        bottom_right.y.into_inner(),
+    );
+    if !(u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()) {
+        u0 = 0.0;
+        v0 = 0.0;
+        u1 = 1.0;
+        v1 = 1.0;
+    }
+    let (u_min, u_max) = (u0.min(u1), u0.max(u1));
+    let (v_min, v_max) = (v0.min(v1), v0.max(v1));
+    let uv = [
+        (rect.x as f32 + u_min * rect.width as f32) / atlas.width as f32,
+        (rect.y as f32 + v_min * rect.height as f32) / atlas.height as f32,
+        (rect.x as f32 + u_max * rect.width as f32) / atlas.width as f32,
+        (rect.y as f32 + v_max * rect.height as f32) / atlas.height as f32,
+    ];
+    ImageInstance { rect: quad, uv }
+}
+
+fn collect_image_instances(
+    atlas: &mut ImageAtlasManager,
+    queue: &wgpu::Queue,
+    image_texture: &wgpu::Texture,
+    terminal: &TerminalSnapshot,
+    cell_dims: [f32; 2],
+) -> Vec<(i32, u64, ImageInstance)> {
+    let [cell_width, cell_height] = cell_dims;
+    let mut collected = Vec::new();
+    let mut sequence = 0u64;
+    for cell in &terminal.cells {
+        if cell.images.is_empty() || cell.row >= terminal.rows || cell.column >= terminal.columns {
+            continue;
+        }
+        let x0 = cell.column as f32 * cell_width;
+        let y0 = cell.row as f32 * cell_height;
+        for image_cell in &cell.images {
+            let (padding_left, padding_top, padding_right, padding_bottom) =
+                image_cell.padding();
+            let left = x0 + (padding_left as f32).min(cell_width);
+            let top = y0 + (padding_top as f32).min(cell_height);
+            let right = x0 + cell_width - (padding_right as f32).min(cell_width);
+            let bottom = y0 + cell_height - (padding_bottom as f32).min(cell_height);
+            if right <= left || bottom <= top {
+                continue;
+            }
+            if let Some(instance) = process_image_slice(
+                atlas,
+                queue,
+                image_texture,
+                image_cell,
+                [left, top, right, bottom],
+            ) {
+                collected.push((image_cell.z_index(), sequence, instance));
+                sequence += 1;
+            }
+        }
+    }
+    collected
+}
+
+/// Prepares every visible image slice for one frame: uploads new atlas
+/// placements, returns draw-ready instances ordered deep (beneath cell
+/// backgrounds), behind-text, then overlay.
+fn prepare_image_instances(
+    atlas: &mut ImageAtlasManager,
+    queue: &wgpu::Queue,
+    image_texture: &wgpu::Texture,
+    terminal: &TerminalSnapshot,
+    cell_dims: [f32; 2],
+) -> PreparedImages {
+    // Per-prepare decode memo for encoded payloads; slices share one decode
+    // within a pass, and the memo never outlives this prepare.
+    atlas.decoded.clear();
+    atlas.begin_generation();
+    let mut collected =
+        collect_image_instances(atlas, queue, image_texture, terminal, cell_dims);
+    if atlas.skipped > 0 {
+        // The atlas ran dry while visible imagery was streaming in. One
+        // rebuild from an empty packer can fix interleaved LRU fights. If a
+        // rebuild already failed to place the full visible set last prepare,
+        // the set genuinely exceeds the atlas: keep resident entries instead
+        // of resetting again, which would re-upload every fitting image on
+        // every redraw while the overflow lasts. This never aborts the
+        // session; worst case a slice is skipped until space frees up.
+        if !atlas.exhausted {
+            atlas.reset();
+            atlas.begin_generation();
+            collected = collect_image_instances(atlas, queue, image_texture, terminal, cell_dims);
+        }
+        if atlas.skipped > 0 && atlas.warn_backoff == 0 {
+            log::warn!(
+                "image atlas exhausted: {} visible image slices left unplaced in {}x{}",
+                atlas.skipped,
+                atlas.width,
+                atlas.height,
+            );
+        }
+        atlas.warn_backoff = (atlas.warn_backoff + 1) % 100;
+        atlas.exhausted = atlas.skipped > 0;
+    } else {
+        atlas.exhausted = false;
+    }
+    atlas.finish_generation();
+    // The decode memo is per-prepare bookkeeping; drop it before the GPU
+    // work so large decoded frames never linger between redraws.
+    atlas.decoded.clear();
+
+    collected.sort_by_key(|(z_index, sequence, _)| (*z_index, *sequence));
+    if collected.len() > MAX_IMAGE_INSTANCES {
+        log::warn!("truncating image instances at {MAX_IMAGE_INSTANCES}");
+        collected.truncate(MAX_IMAGE_INSTANCES);
+    }
+    let deep_count = collected
+        .iter()
+        .take_while(|(z_index, _, _)| *z_index < DEEP_IMAGE_Z_THRESHOLD)
+        .count();
+    let behind_count = collected[deep_count..]
+        .iter()
+        .take_while(|(z_index, _, _)| *z_index < 0)
+        .count();
+    PreparedImages {
+        instances: collected
+            .into_iter()
+            .map(|(_, _, instance)| instance)
+            .collect(),
+        deep_count,
+        behind_count,
+    }
+}
+
 struct NativeWindowOwner {
     ptr: NonNull<c_void>,
 }
@@ -505,13 +1454,33 @@ struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
+    /// Fullscreen background-layer pass (opaque cell backgrounds).
+    background_pipeline: wgpu::RenderPipeline,
+    /// Fullscreen text-layer pass (alpha-blended glyphs, rules, cursor).
+    text_pipeline: wgpu::RenderPipeline,
+    /// Instanced image-slice pass (alpha-blended quads).
+    image_pipeline: wgpu::RenderPipeline,
+    /// View uniforms for the background pass (`mode = 0`).
     uniform_buffer: wgpu::Buffer,
+    /// View uniforms for the text pass (`mode = 1`).
+    text_uniform_buffer: wgpu::Buffer,
     cell_buffer: wgpu::Buffer,
     atlas_texture: wgpu::Texture,
     _atlas_view: wgpu::TextureView,
     _atlas_sampler: wgpu::Sampler,
     view_bind_group: wgpu::BindGroup,
+    text_view_bind_group: wgpu::BindGroup,
+    image_atlas_texture: wgpu::Texture,
+    _image_atlas_view: wgpu::TextureView,
+    image_bind_group: wgpu::BindGroup,
+    image_instance_buffer: wgpu::Buffer,
+    image_atlas: ImageAtlasManager,
+    image_instances: Vec<ImageInstance>,
+    /// Leading `image_instances` entries with z below `i32::MIN / 2`, drawn
+    /// beneath the opaque cell backgrounds.
+    image_deep_count: usize,
+    /// Following `image_instances` entries with z<0, drawn behind the text.
+    image_behind_count: usize,
     surface_config: wgpu::SurfaceConfiguration,
     density_dpi: u32,
     zoom_percent: u32,
@@ -529,8 +1498,7 @@ impl Renderer {
         terminal: &TerminalSnapshot,
     ) -> Result<Self> {
         let native_window_owner = NativeWindowOwner { ptr: native_window };
-        let mut font_set = build_font_set(density_dpi)?;
-        let prepared = prepare_terminal(&mut font_set, terminal, density_dpi, None)?;
+        let font_set = build_font_set(density_dpi)?;
         let raw_handle = AndroidWindowHandle { ptr: native_window };
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -605,15 +1573,33 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
+        let (skip_default_background, default_background) = deep_background_state(terminal);
         let uniform = Self::uniform(
             surface_config.width,
             surface_config.height,
             density_dpi,
             terminal,
+            0,
+            skip_default_background,
+            default_background,
         );
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wezterm-android-p1-view-uniform"),
             contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let text_uniform = Self::uniform(
+            surface_config.width,
+            surface_config.height,
+            density_dpi,
+            terminal,
+            1,
+            skip_default_background,
+            default_background,
+        );
+        let text_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("wezterm-android-p1-text-view-uniform"),
+            contents: bytemuck::bytes_of(&text_uniform),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let cell_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -622,25 +1608,20 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let atlas_texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: Some("wezterm-android-p1-glyph-atlas"),
-                size: wgpu::Extent3d {
-                    width: GLYPH_ATLAS_WIDTH,
-                    height: GLYPH_ATLAS_HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wezterm-android-p1-glyph-atlas"),
+            size: wgpu::Extent3d {
+                width: GLYPH_ATLAS_WIDTH,
+                height: GLYPH_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
             },
-            Default::default(),
-            prepared.atlas.pixels(),
-        );
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("wezterm-android-p1-glyph-atlas-sampler"),
@@ -715,6 +1696,103 @@ impl Renderer {
                 },
             ],
         });
+        let text_view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wezterm-android-p1-text-view-bind-group"),
+            layout: &view_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: text_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: cell_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+        let image_atlas_format = if format.is_srgb() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let image_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wezterm-android-p1-image-atlas"),
+            size: wgpu::Extent3d {
+                width: IMAGE_ATLAS_WIDTH,
+                height: IMAGE_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: image_atlas_format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let image_atlas_view = image_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wezterm-android-p1-image-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wezterm-android-p1-image-bind-group"),
+            layout: &image_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+        let image_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wezterm-android-p1-image-instances"),
+            size: (MAX_IMAGE_INSTANCES * std::mem::size_of::<ImageInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wezterm-android-p1-terminal-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -724,8 +1802,59 @@ impl Renderer {
             bind_group_layouts: &[&view_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wezterm-android-p1-terminal-pipeline"),
+        let image_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wezterm-android-p1-image-pipeline-layout"),
+                bind_group_layouts: &[&image_layout],
+                push_constant_ranges: &[],
+            });
+        let image_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ImageInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 1,
+                },
+            ],
+        };
+        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wezterm-android-p1-background-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    // Cells with default (modal) backgrounds report alpha 0
+                    // while deep imagery is visible so it can show through;
+                    // every other cell is opaque, which blends to the same
+                    // result as the previous unblended pass.
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wezterm-android-p1-text-pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -738,7 +1867,35 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wezterm-android-p1-image-pipeline"),
+            layout: Some(&image_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image_main"),
+                buffers: &[image_vertex_layout],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_image_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    // Atlas pixels are premultiplied on upload, so linear
+                    // filtering and this blend keep transparent edges free
+                    // of dark fringes.
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -759,27 +1916,38 @@ impl Renderer {
             surface_config.present_mode,
         );
 
-        queue.write_buffer(&cell_buffer, 0, bytemuck::cast_slice(&prepared.cells));
-        log_prepared_terminal(&prepared);
-
-        Ok(Self {
+        let mut renderer = Self {
             surface,
             device,
             queue,
-            pipeline,
+            background_pipeline,
+            text_pipeline,
+            image_pipeline,
             uniform_buffer,
+            text_uniform_buffer,
             cell_buffer,
             atlas_texture,
             _atlas_view: atlas_view,
             _atlas_sampler: atlas_sampler,
             view_bind_group,
+            text_view_bind_group,
+            image_atlas_texture,
+            _image_atlas_view: image_atlas_view,
+            image_bind_group,
+            image_instance_buffer,
+            image_atlas: ImageAtlasManager::new(IMAGE_ATLAS_WIDTH, IMAGE_ATLAS_HEIGHT),
+            image_instances: Vec::new(),
+            image_deep_count: 0,
+            image_behind_count: 0,
             surface_config,
             density_dpi,
             zoom_percent: TERMINAL_ZOOM_PERCENT.load(Ordering::SeqCst),
             font_set,
             _instance: instance,
             _native_window: native_window_owner,
-        })
+        };
+        renderer.upload_terminal(terminal, None)?;
+        Ok(renderer)
     }
 
     fn uniform(
@@ -787,6 +1955,9 @@ impl Renderer {
         height: u32,
         density_dpi: u32,
         terminal: &TerminalSnapshot,
+        mode: u32,
+        skip_default_background: u32,
+        default_background: [f32; 3],
     ) -> ViewUniform {
         ViewUniform {
             resolution: [width.max(1) as f32, height.max(1) as f32],
@@ -794,7 +1965,10 @@ impl Renderer {
             cursor_cell: [terminal.cursor_column as f32, terminal.cursor_row as f32],
             padding: [0.0, 0.0],
             terminal_size: [terminal.columns as u32, terminal.rows as u32],
-            _reserved: [0, 0],
+            mode,
+            _pad: 0,
+            default_background,
+            skip_default_background,
         }
     }
 
@@ -833,14 +2007,21 @@ impl Renderer {
             self.font_set = build_font_set(self.density_dpi)?;
             log::info!("rebuilt glyph fonts for terminal zoom {zoom_percent}%");
         }
-        let uniform = Self::uniform(
+        let (skip_default_background, default_background) = deep_background_state(terminal);
+        let mut uniform = Self::uniform(
             self.surface_config.width,
             self.surface_config.height,
             self.density_dpi,
             terminal,
+            0,
+            skip_default_background,
+            default_background,
         );
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+        uniform.mode = 1;
+        self.queue
+            .write_buffer(&self.text_uniform_buffer, 0, bytemuck::bytes_of(&uniform));
         let prepared = prepare_terminal(&mut self.font_set, terminal, self.density_dpi, selection)?;
         self.queue
             .write_buffer(&self.cell_buffer, 0, bytemuck::cast_slice(&prepared.cells));
@@ -864,6 +2045,33 @@ impl Renderer {
             },
         );
         log_prepared_terminal(&prepared);
+
+        // Terminal imagery: resolve every visible cell slice against the
+        // image atlas, uploading placements that are not resident yet.
+        let prepared_images = prepare_image_instances(
+            &mut self.image_atlas,
+            &self.queue,
+            &self.image_atlas_texture,
+            terminal,
+            cell_size(self.density_dpi),
+        );
+        if !prepared_images.instances.is_empty() {
+            self.queue.write_buffer(
+                &self.image_instance_buffer,
+                0,
+                bytemuck::cast_slice(&prepared_images.instances),
+            );
+        }
+        self.image_instances = prepared_images.instances;
+        self.image_deep_count = prepared_images.deep_count;
+        self.image_behind_count = prepared_images.behind_count;
+        log::debug!(
+            "prepared image instances total={} deep={} behind_text={} atlas_entries={}",
+            self.image_instances.len(),
+            self.image_deep_count,
+            self.image_behind_count,
+            self.image_atlas.entries.len(),
+        );
         Ok(())
     }
 
@@ -911,13 +2119,71 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            render_pass.set_pipeline(&self.pipeline);
+            // 1. Deep imagery: z <= i32::MIN/2 belongs beneath cells with
+            //    non-default background colors, so it composites over the
+            //    cleared framebuffer before the background pass paints.
+            let deep = self.image_deep_count;
+            let behind = self.image_behind_count;
+            let total = self.image_instances.len();
+            let overlay = total - deep - behind;
+            if deep > 0 {
+                render_pass.set_pipeline(&self.image_pipeline);
+                render_pass.set_bind_group(0, &self.image_bind_group, &[]);
+                render_pass.set_vertex_buffer(
+                    0,
+                    self.image_instance_buffer
+                        .slice(..(deep as u64) * std::mem::size_of::<ImageInstance>() as u64),
+                );
+                render_pass.draw(0..6, 0..deep as u32);
+            }
+            // 2. Background layer: opaque cell backgrounds. Cells painted in
+            //    the modal default background stay transparent here so the
+            //    deep layer beneath remains visible.
+            render_pass.set_pipeline(&self.background_pipeline);
             render_pass.set_bind_group(0, &self.view_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
+            // 3. Terminal imagery with z<0 composites over backgrounds and
+            //    underneath the text layer.
+            if behind > 0 {
+                render_pass.set_pipeline(&self.image_pipeline);
+                render_pass.set_bind_group(0, &self.image_bind_group, &[]);
+                let deep_bytes = (deep as u64) * std::mem::size_of::<ImageInstance>() as u64;
+                render_pass.set_vertex_buffer(
+                    0,
+                    self.image_instance_buffer.slice(
+                        deep_bytes..deep_bytes + (behind as u64) * std::mem::size_of::<ImageInstance>() as u64,
+                    ),
+                );
+                render_pass.draw(0..6, 0..behind as u32);
+            }
+            // 4. Text layer: glyphs, rules, cursor, alpha-blended over
+            //    whatever the earlier stages left beneath.
+            render_pass.set_pipeline(&self.text_pipeline);
+            render_pass.set_bind_group(0, &self.text_view_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+            // 5. Terminal imagery with z>=0 sits on top of everything.
+            if overlay > 0 {
+                render_pass.set_pipeline(&self.image_pipeline);
+                render_pass.set_bind_group(0, &self.image_bind_group, &[]);
+                let behind_bytes =
+                    ((deep + behind) as u64) * std::mem::size_of::<ImageInstance>() as u64;
+                render_pass.set_vertex_buffer(
+                    0,
+                    self.image_instance_buffer
+                        .slice(behind_bytes..behind_bytes + (overlay as u64) * std::mem::size_of::<ImageInstance>() as u64),
+                );
+                render_pass.draw(0..6, 0..overlay as u32);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// When the currently displayed animated imagery wants its next frame,
+    /// if any. `None` means everything on screen is static.
+    fn animation_due(&self) -> Option<Instant> {
+        self.image_atlas.next_frame_due
     }
 }
 
@@ -933,6 +2199,29 @@ fn init_logging() {
                         .build(),
                 ),
         );
+        // Rust's default hook writes to stderr, which Android discards for
+        // apps. Log the panic location and payload so a native abort is not
+        // left with only an unsymbolized tombstone.
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                })
+                .unwrap_or_else(|| "unknown location".to_string());
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_string());
+            log::error!("Rust panic at {location}: {payload}");
+        }));
     });
 }
 
@@ -1036,7 +2325,60 @@ fn current_mux_size() -> Result<MuxTerminalSize> {
     })
 }
 
+/// Folds one content hash into a running signature value.
+fn fold_hash_into(target: &mut [u8; 32], source: &[u8; 32]) {
+    for (byte, part) in target.iter_mut().zip(source) {
+        *byte ^= *part;
+    }
+}
+
+/// Summarizes the current pixel content of every visible image slice: the
+/// immutable image identity folded with the mutable per-frame hashes
+/// upstream refreshes whenever kitty `f=`/composition edits rewrite pixels
+/// in place. Reads cached hashes only; never decodes.
+fn image_content_signature(terminal: &TerminalSnapshot) -> Vec<[u8; 32]> {
+    let mut signature = Vec::new();
+    for cell in &terminal.cells {
+        for image_cell in &cell.images {
+            let image = image_cell.image_data();
+            let mut folded = image.hash();
+            match &*image.data() {
+                ImageDataType::Rgba8 { hash, .. } => fold_hash_into(&mut folded, hash),
+                ImageDataType::AnimRgba8 { hashes, .. } => {
+                    for hash in hashes {
+                        fold_hash_into(&mut folded, hash);
+                    }
+                }
+                // Encoded payloads never change under an identity.
+                _ => {}
+            }
+            signature.push(folded);
+        }
+    }
+    signature
+}
+
+/// Compares the image pixel content of `terminal` against the last rendered
+/// snapshot, recording the new signature either way. `TerminalSnapshot`
+/// equality misses in-place kitty edits, so the mux poll consults this to
+/// decide whether an otherwise identical snapshot still needs a redraw.
+fn refresh_image_content_signature(terminal: &TerminalSnapshot) -> bool {
+    let has_images = terminal.cells.iter().any(|cell| !cell.images.is_empty());
+    let signature = if has_images {
+        image_content_signature(terminal)
+    } else {
+        Vec::new()
+    };
+    LAST_IMAGE_CONTENT.with(|last| {
+        let mut last = last.borrow_mut();
+        let changed = *last != signature;
+        *last = signature;
+        changed
+    })
+}
+
 fn render_terminal_snapshot(terminal: &TerminalSnapshot) -> Result<()> {
+    refresh_image_content_signature(terminal);
     let selection = VIEW_INTERACTION.with(|interaction| {
         let mut interaction = interaction.borrow_mut();
         interaction.observe_snapshot(terminal);
@@ -1100,6 +2442,33 @@ fn feed_terminal_and_render(bytes: &[u8]) -> Result<()> {
         Ok::<_, anyhow::Error>(model.snapshot_with_viewport_top(pinned_top))
     })?;
     render_terminal_snapshot(&terminal)
+}
+
+/// True when currently displayed animated imagery is due for its next frame.
+fn animation_frame_due() -> bool {
+    RENDERER.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(Renderer::animation_due)
+            .is_some_and(|due| Instant::now() >= due)
+    })
+}
+
+/// Re-runs the full prepare+render cycle for the snapshot already on screen
+/// so wall-clock animation frames (GIF/APNG) keep advancing on the Kotlin
+/// poll cadence. Returns true when a frame was presented.
+fn render_animation_frame() -> Result<bool> {
+    if !animation_frame_due() {
+        return Ok(false);
+    }
+    let snapshot = LAST_VIEW_SNAPSHOT.with(|last| last.borrow().clone());
+    match snapshot {
+        Some(snapshot) => {
+            render_terminal_snapshot(&snapshot)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 fn pump_mux_terminal() -> Result<bool> {
@@ -1191,8 +2560,16 @@ fn pump_mux_terminal() -> Result<bool> {
     });
     if changed {
         render_terminal_snapshot(&snapshot.terminal)?;
+        Ok(true)
+    } else if refresh_image_content_signature(&snapshot.terminal) {
+        // The cell grid is identical, but kitty edited image pixels in
+        // place; the new content keys make the image prepare re-upload the
+        // changed frames during this redraw.
+        render_terminal_snapshot(&snapshot.terminal)?;
+        Ok(true)
+    } else {
+        render_animation_frame()
     }
-    Ok(changed)
 }
 
 fn report_mux_transport_failure(message: String) {
@@ -1578,8 +2955,13 @@ fn ffi_guard(operation: &str, callback: impl FnOnce() -> Result<()>) -> jboolean
             log::error!("{} failed: {:#}", operation, error);
             JNI_FALSE
         }
-        Err(_) => {
-            log::error!("{} panicked", operation);
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic payload");
+            log::error!("{} panicked: {}", operation, detail);
             JNI_FALSE
         }
     }
@@ -2217,7 +3599,9 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeSshP
             session.drain_pty_output(256 * 1024)
         };
         if bytes.is_empty() {
-            return Ok(false);
+            // No fresh PTY output; still present a frame when animated
+            // imagery (GIF/APNG) is due to advance on wall-clock time.
+            return render_animation_frame();
         }
         log::debug!("feeding {} remote PTY bytes into wezterm-term", bytes.len());
         feed_terminal_and_render(&bytes)?;
@@ -2413,6 +3797,22 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxS
             std::fs::create_dir_all(private_home.join(relative))
                 .with_context(|| format!("create app-private {relative} directory"))?;
         }
+        // MUX image PDUs deserialize into the process-global blob store.
+        // Retain the same store across detach/re-attach: previously hydrated
+        // ImageData leases may still be referenced by the rendered snapshot.
+        IMAGE_BLOB_STORAGE
+            .get_or_init(|| {
+                let blob_dir = private_home.join("image-blob-leases");
+                let blob_storage =
+                    wezterm_blob_leases::simple_tempdir::SimpleTempDir::new_in(&blob_dir)
+                        .map_err(|error| format!("create image blob storage: {error:#}"))?;
+                wezterm_blob_leases::register_storage(Arc::new(blob_storage))
+                    .map_err(|error| format!("register image blob storage: {error:#}"))?;
+                log::info!("registered SSHMUX image blob lease storage in {}", blob_dir.display());
+                Ok(())
+            })
+            .as_ref()
+            .map_err(|error| anyhow!("{error}"))?;
         #[cfg(target_os = "android")]
         if !dirs_next::set_android_home_dir(private_home) {
             bail!("Android private home was already initialized to a different directory");
@@ -2523,7 +3923,15 @@ pub extern "system" fn Java_com_example_wezterm_1android_NativeBridge_nativeMuxP
         };
         if let Some(event) = event {
             match event {
-                MuxEvent::Attached { .. } => MUX_READY.store(true, Ordering::SeqCst),
+                MuxEvent::Attached { .. } => {
+                    MUX_READY.store(true, Ordering::SeqCst);
+                    // The Surface may have changed while the SSHMUX handshake
+                    // was pending; before this event MUX_READY suppresses all
+                    // resize calls. Push the latest grid as soon as attached.
+                    if let Err(error) = resize_remote_pty_if_ready() {
+                        log::warn!("unable to size newly attached SSHMUX pane: {error:#}");
+                    }
+                }
                 MuxEvent::Detached | MuxEvent::Error { .. } => {
                     MUX_READY.store(false, Ordering::SeqCst)
                 }

@@ -7,7 +7,7 @@
 它不依赖 X11、Wayland、Termux:X11、proot 或 Linux 桌面环境，也不是 WezTerm 官方
 Android 发行版。
 
-> 当前版本：`v0.2.4`。仅提供 `arm64-v8a` 调试签名 APK，已在
+> 当前版本：`v0.2.5`。仅提供 `arm64-v8a` 调试签名 APK，已在
 > Android 15 / API 35 真机完成核心功能验证，不应当作生产稳定版或正式密钥分发渠道。
 
 ## 应用截图
@@ -15,6 +15,10 @@ Android 发行版。
 ### SSHMUX、动态标题与固定终端键盘
 
 ![Android 15 上的 SSHMUX、动态标题、中文字符与固定终端键盘](artifacts/app-screenshots/v0.1.0-mux-keyboard.png)
+
+### SSHMUX 内联 PNG 图像（OPD2407 平板）
+
+![平板 SSHMUX 中由 wezterm imgcat 显示的左红右蓝 PNG](artifacts/app-screenshots/android15-inline-image-mux-png.png)
 
 | 无连接像素猫 | Material 3 设置页 |
 |---|---|
@@ -24,6 +28,9 @@ Android 发行版。
 
 - Android `SurfaceView` → JNI `ANativeWindow` → wgpu/Vulkan 原生渲染；
 - `wezterm-term` ANSI/TrueColor/cell/scrollback 终端模型；
+- 内联终端图像：iTerm2 OSC 1337 imgcat、kitty 图形与 sixel 经 cell 图像切片进入同一
+  终端快照/wgpu 渲染管线，GIF/APNG 按帧时间推进（真机已验证 SSHMUX imgcat PNG；
+  sixel、kitty 与普通 SSH 图像路径尚无真机证据）；
 - MesloLGS Nerd Font Mono + 内置 Noto Sans Math + Android Noto Sans CJK fallback；
 - 普通 SSH：host-key、认证、`xterm-256color` PTY、输入与 resize；
 - SSHMUX：持久远端标签、新建/切换/关闭、安全 Detach、自动重附着和活动标签恢复；
@@ -31,7 +38,7 @@ Android 发行版。
 - 动态标签标题，跟随远端 pane/OSC title 更新；
 - 每个远端标签独立记忆滚动位置，浏览历史时新输出不再推移视野；
 - 设置页终端缩放：滑条调节单元格大小并实时预览行列网格，返回终端自动 resize；
-- 单排紧凑顶部状态栏，最大化终端内容显示区域；
+- 竖屏两排紧凑顶部状态栏（连接管理 + 标签/滚动操作），横屏单排，最大化终端内容显示区域；
 - 固定底部英文/符号/特殊键键盘，不覆盖终端 Surface；
 - 独立系统 IME 输入框，支持自动换行、按 MUX 标签保存草稿并整串发送；
 - 单指发送远端滚轮给 TUI，双指浏览本地历史；
@@ -39,6 +46,16 @@ Android 发行版。
 - 前后台 Surface 重建、失效连接识别和指数退避恢复；
 - 纯黑终端、无连接像素猫、Material 3 深色界面；
 - 跟随系统、English、简体中文以及设置页开发者信息。
+
+## v0.2.5 更新
+
+- 修复 SSHMUX 长时间浏览内联截图后原生 OOM abort：`wezterm-client` 图片缓存
+  从 128 条无字节上限改为 8 条 / 128 MiB，单图 32 MiB，超限图片跳过并记录警告；
+- native 解码增加编码 32 MiB、解码后 64 MiB 上限，并安装 Rust panic hook 将
+  panic 位置和 payload 写入 `WezTermAndroid` logcat；
+- 新建 MUX 标签时主动发送当前 Surface 行列的 resize，修复首次显示继承旧窗口
+  尺寸、提示符跑到可见区域外的问题；
+- 内联图像真机证据：[OPD2407 imgcat PNG](artifacts/app-screenshots/android15-inline-image-mux-png.png)。
 
 ## v0.2.4 更新
 
@@ -91,7 +108,7 @@ Android 发行版。
 ## 获取 APK
 
 从 [GitHub Releases](https://github.com/wyyyz1937365497/WezTerm_Android/releases)
-下载 `wezterm-android-v0.2.4-arm64.apk`。当前 Release 的工程边界是：
+下载 `wezterm-android-v0.2.5-arm64.apk`。当前 Release 的工程边界是：
 
 - 仅支持 `arm64-v8a`；
 - release 构建变体 + cargo `--release` 原生库，使用 Android debug 密钥签名，并保留
@@ -165,6 +182,8 @@ adb logcat -s WezTermAndroid
 - 没有本地 PTY、本地 shell、本地 mux server 或桌面窗口兼容层；
 - 普通 SSH 断线后不能恢复同一个 shell，持久任务应使用 SSHMUX；
 - 复杂 Indic/ZWJ cluster、彩色 emoji、粗体/斜体 face 和链接交互待完善；
+- 内联图像仅有 SSHMUX imgcat PNG 的 OPD2407 真机证据；sixel、kitty、普通 SSH 图像
+  路径与 GIF/APNG 动画推进仍缺真机回归；
 - Wi-Fi/蜂窝切换、Doze、长时间后台、横竖屏、分屏和更多 OEM 设备仍需压力回归；
 - 当前是“进程存活则保持，连接失效或进程重启后自动重附着”，不是前台服务式无限
   后台保活；
@@ -181,6 +200,7 @@ rust/
   wezterm-android-font     HarfBuzz、FreeType、Meslo/数学/CJK 与 glyph atlas
   wezterm-android-ssh      普通 SSH 客户端
   wezterm-android-mux      SSHMUX client、标签与恢复
+  vendor/wezterm-client-android  上游 client 本地补丁：图片缓存字节上限
 docs/
   ARCHITECTURE.md          当前目标与架构
   MAINTENANCE.md           开发历程、问题与维护方法
